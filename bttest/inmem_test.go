@@ -78,6 +78,8 @@ func newTestServer(t *testing.T) *server {
 		tables:       make(map[string]*table),
 		db:           db,
 		tableBackend: NewSqlTables(db),
+		adminBackend: NewSqlAdminMetadata(db),
+		changeLog:    NewSqlChangeLog(db),
 		mvBackend:    NewSqlMaterializedViews(db),
 		cmvs:         newCMVRegistry(),
 	}

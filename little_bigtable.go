@@ -1,5 +1,5 @@
 /*
-little_bigtable launches the sqlite3 backed Bigtable emulator on the given address.
+bigtable-emulator-extended launches a PostgreSQL-backed Bigtable emulator on the given address.
 */
 package main
 
@@ -12,20 +12,24 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/bitly/little_bigtable/bttest"
+	"github.com/localcloud/bigtable-emulator-extended/bttest"
+	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
 	"google.golang.org/grpc"
 )
 
 const (
 	maxMsgSize = 256 * 1024 * 1024 // 256 MiB
-	version    = "0.2.0"
+	version    = "0.3.0-localcloud"
 )
 
 func main() {
 	host := flag.String("host", "localhost", "the address to bind to on the local machine")
 	port := flag.Int("port", 9000, "the port number to bind to on the local machine")
-	dbFile := flag.String("db-file", "little_bigtable.db", "path to data file")
+	databaseDriver := flag.String("database-driver", "postgres", "database/sql driver name: postgres or sqlite3")
+	databaseURL := flag.String("database-url", "", "database/sql connection string")
+	dbFile := flag.String("db-file", "little_bigtable.db", "legacy sqlite3 data file path")
+	strictAdmin := flag.Bool("strict-admin", true, "require instances to exist before table/data APIs are used")
 	showVersion := flag.Bool("version", false, "show version")
 
 	ctx := context.Background()
@@ -34,19 +38,34 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
 	if *showVersion {
-		fmt.Printf("little_bigtable v%s (built w/%s)", version, runtime.Version())
+		fmt.Printf("bigtable-emulator-extended v%s (built w/%s)", version, runtime.Version())
 		os.Exit(0)
 	}
 
-	if *dbFile == "" {
-		log.Fatal("missing --db-file")
+	if *databaseDriver == "" {
+		log.Fatal("missing --database-driver")
 	}
 
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared", *dbFile))
-	if err != nil {
-		log.Fatalf("failed creating sqlite3 connection %v", err)
+	dsn := *databaseURL
+	if *databaseDriver == "sqlite3" {
+		if *dbFile == "" {
+			log.Fatal("missing --db-file")
+		}
+		dsn = fmt.Sprintf("file:%s?cache=shared", *dbFile)
 	}
-	db.SetMaxOpenConns(1)
+	if dsn == "" {
+		log.Fatal("missing --database-url")
+	}
+
+	bttest.ConfigureStorage(*databaseDriver, *strictAdmin)
+
+	db, err := sql.Open(*databaseDriver, dsn)
+	if err != nil {
+		log.Fatalf("failed creating database connection %v", err)
+	}
+	if *databaseDriver == "sqlite3" {
+		db.SetMaxOpenConns(1)
+	}
 
 	err = bttest.CreateTables(ctx, db)
 	if err != nil {
@@ -62,6 +81,6 @@ func main() {
 		log.Fatalf("failed to start emulator: %v", err)
 	}
 
-	log.Printf("\"little\" Bigtable emulator running. DB:%s Connect with environment variable BIGTABLE_EMULATOR_HOST=%q", *dbFile, srv.Addr)
+	log.Printf("LocalCloud Bigtable emulator running. driver=%s strict_admin=%t BIGTABLE_EMULATOR_HOST=%q", *databaseDriver, *strictAdmin, srv.Addr)
 	select {}
 }

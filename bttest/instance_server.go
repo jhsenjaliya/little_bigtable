@@ -35,23 +35,23 @@ var _ btapb.BigtableInstanceAdminServer = (*server)(nil)
 var errUnimplemented = status.Error(codes.Unimplemented, "unimplemented feature")
 
 func (s *server) CreateInstance(ctx context.Context, req *btapb.CreateInstanceRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
+	return s.localCreateInstance(ctx, req)
 }
 
 func (s *server) GetInstance(ctx context.Context, req *btapb.GetInstanceRequest) (*btapb.Instance, error) {
-	return nil, errUnimplemented
+	return s.localGetInstance(ctx, req)
 }
 
 func (s *server) ListInstances(ctx context.Context, req *btapb.ListInstancesRequest) (*btapb.ListInstancesResponse, error) {
-	return nil, errUnimplemented
+	return s.localListInstances(ctx, req)
 }
 
 func (s *server) UpdateInstance(ctx context.Context, req *btapb.Instance) (*btapb.Instance, error) {
-	return nil, errUnimplemented
+	return s.localUpdateInstance(ctx, req)
 }
 
 func (s *server) PartialUpdateInstance(ctx context.Context, req *btapb.PartialUpdateInstanceRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
+	return s.localPartialUpdateInstance(ctx, req)
 }
 
 var (
@@ -63,81 +63,76 @@ var (
 )
 
 func (s *server) DeleteInstance(ctx context.Context, req *btapb.DeleteInstanceRequest) (*empty.Empty, error) {
-	name := req.GetName()
-	if !regInstanceName.Match([]byte(name)) {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"Error in field 'instance_name' : Invalid name for collection instances : Should match %s but found '%s'",
-			instanceNameRegRaw, name)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, ok := s.instances[name]
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "instance %q not found", name)
-	}
-
-	// Then finally remove the instance.
-	delete(s.instances, name)
-
-	return new(empty.Empty), nil
+	return s.localDeleteInstance(ctx, req)
 }
 
 func (s *server) CreateCluster(ctx context.Context, req *btapb.CreateClusterRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
+	return s.localCreateCluster(ctx, req)
 }
 
 func (s *server) GetCluster(ctx context.Context, req *btapb.GetClusterRequest) (*btapb.Cluster, error) {
-	return nil, errUnimplemented
+	return s.localGetCluster(ctx, req)
 }
 
 func (s *server) ListClusters(ctx context.Context, req *btapb.ListClustersRequest) (*btapb.ListClustersResponse, error) {
-	return nil, errUnimplemented
+	return s.localListClusters(ctx, req)
 }
 
 func (s *server) UpdateCluster(ctx context.Context, req *btapb.Cluster) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
+	return s.localUpdateCluster(ctx, req)
 }
 
 func (s *server) PartialUpdateCluster(ctx context.Context, req *btapb.PartialUpdateClusterRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
+	return s.localPartialUpdateCluster(ctx, req)
 }
 
 func (s *server) DeleteCluster(ctx context.Context, req *btapb.DeleteClusterRequest) (*empty.Empty, error) {
-	return nil, errUnimplemented
+	return s.localDeleteCluster(ctx, req)
 }
 
 func (s *server) CreateAppProfile(ctx context.Context, req *btapb.CreateAppProfileRequest) (*btapb.AppProfile, error) {
-	return nil, errUnimplemented
+	return s.localCreateAppProfile(ctx, req)
 }
 
 func (s *server) GetAppProfile(ctx context.Context, req *btapb.GetAppProfileRequest) (*btapb.AppProfile, error) {
-	return nil, errUnimplemented
+	return s.localGetAppProfile(ctx, req)
 }
 
 func (s *server) ListAppProfiles(ctx context.Context, req *btapb.ListAppProfilesRequest) (*btapb.ListAppProfilesResponse, error) {
-	return nil, errUnimplemented
+	return s.localListAppProfiles(ctx, req)
 }
 
 func (s *server) UpdateAppProfile(ctx context.Context, req *btapb.UpdateAppProfileRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
+	return s.localUpdateAppProfile(ctx, req)
 }
 
 func (s *server) DeleteAppProfile(ctx context.Context, req *btapb.DeleteAppProfileRequest) (*empty.Empty, error) {
-	return nil, errUnimplemented
+	return s.localDeleteAppProfile(ctx, req)
 }
 
 func (s *server) GetIamPolicy(ctx context.Context, req *iampb.GetIamPolicyRequest) (*iampb.Policy, error) {
-	return nil, errUnimplemented
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.iamPolicies[req.GetResource()]; ok {
+		return p, nil
+	}
+	return &iampb.Policy{Version: 1}, nil
 }
 
 func (s *server) SetIamPolicy(ctx context.Context, req *iampb.SetIamPolicyRequest) (*iampb.Policy, error) {
-	return nil, errUnimplemented
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.iamPolicies == nil {
+		s.iamPolicies = make(map[string]*iampb.Policy)
+	}
+	s.iamPolicies[req.GetResource()] = req.GetPolicy()
+	return req.GetPolicy(), nil
 }
 
 func (s *server) TestIamPermissions(ctx context.Context, req *iampb.TestIamPermissionsRequest) (*iampb.TestIamPermissionsResponse, error) {
-	return nil, errUnimplemented
+	return &iampb.TestIamPermissionsResponse{
+		Permissions: req.GetPermissions(),
+	}, nil
 }
 
 func (s *server) ListHotTablets(ctx context.Context, req *btapb.ListHotTabletsRequest) (*btapb.ListHotTabletsResponse, error) {
@@ -278,22 +273,4 @@ func (s *server) DeleteMaterializedView(ctx context.Context, req *btapb.DeleteMa
 	return new(empty.Empty), nil
 }
 
-func (s *server) CreateLogicalView(ctx context.Context, req *btapb.CreateLogicalViewRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) GetLogicalView(ctx context.Context, req *btapb.GetLogicalViewRequest) (*btapb.LogicalView, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) ListLogicalViews(ctx context.Context, req *btapb.ListLogicalViewsRequest) (*btapb.ListLogicalViewsResponse, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) UpdateLogicalView(ctx context.Context, req *btapb.UpdateLogicalViewRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) DeleteLogicalView(ctx context.Context, req *btapb.DeleteLogicalViewRequest) (*empty.Empty, error) {
-	return nil, errUnimplemented
-}
+// Logical view methods moved to localcloud_logical_views.go

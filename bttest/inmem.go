@@ -49,6 +49,7 @@ import (
 
 	btapb "cloud.google.com/go/bigtable/admin/apiv2/adminpb"
 	btpb "cloud.google.com/go/bigtable/apiv2/bigtablepb"
+	"cloud.google.com/go/iam/apiv1/iampb"
 	"cloud.google.com/go/longrunning/autogen/longrunningpb"
 	longrunning "cloud.google.com/go/longrunning/autogen/longrunningpb"
 	emptypb "github.com/golang/protobuf/ptypes/empty"
@@ -91,12 +92,20 @@ type server struct {
 	mu           sync.Mutex
 	tables       map[string]*table          // keyed by fully qualified name
 	instances    map[string]*btapb.Instance // keyed by fully qualified name
+	clusters     map[string]*btapb.Cluster  // keyed by fully qualified name
+	appProfiles  map[string]*btapb.AppProfile
 	gcc          chan int                   // set when gcloop starts, closed when server shuts down
 	db           *sql.DB
 	tableBackend *SqlTables
+	adminBackend *SqlAdminMetadata
+	changeLog    *SqlChangeLog
 	mvBackend    *SqlMaterializedViews
+	avBackend    *SqlAuthorizedViews
+	backupBackend *SqlBackups
+	lvBackend    *SqlLogicalViews
 	cmvs         *cmvRegistry
 
+	iamPolicies       map[string]*iampb.Policy            // keyed by resource name
 	materializedViews map[string]*btapb.MaterializedView // keyed by full resource name
 
 	// Any unimplemented methods will cause a panic.
@@ -121,10 +130,17 @@ func NewServer(laddr string, db *sql.DB, opt ...grpc.ServerOption) (*Server, err
 		s: &server{
 			tables:            make(map[string]*table),
 			instances:         make(map[string]*btapb.Instance),
+			clusters:          make(map[string]*btapb.Cluster),
+			appProfiles:       make(map[string]*btapb.AppProfile),
 			materializedViews: make(map[string]*btapb.MaterializedView),
 			db:                db,
 			tableBackend:      NewSqlTables(db),
+			adminBackend:      NewSqlAdminMetadata(db),
+			changeLog:         NewSqlChangeLog(db),
 			mvBackend:         NewSqlMaterializedViews(db),
+			avBackend:         NewSqlAuthorizedViews(db),
+			backupBackend:     NewSqlBackups(db),
+			lvBackend:         NewSqlLogicalViews(db),
 			cmvs:              newCMVRegistry(),
 		},
 	}
@@ -132,6 +148,7 @@ func NewServer(laddr string, db *sql.DB, opt ...grpc.ServerOption) (*Server, err
 		operations: make(map[string]*longrunningpb.Operation),
 	}
 	longrunningpb.RegisterOperationsServer(s.srv, opsServer)
+	s.s.LoadAdminMetadata()
 	s.s.LoadTables()
 	s.s.LoadMaterializedViews()
 	btapb.RegisterBigtableInstanceAdminServer(s.srv, s.s)
@@ -159,6 +176,21 @@ func (s *server) LoadTables() {
 	tables := s.tableBackend.GetAll()
 	for _, t := range tables {
 		s.tables[t.parent+"/tables/"+t.tableId] = t
+	}
+}
+
+func (s *server) LoadAdminMetadata() {
+	if s.adminBackend == nil {
+		return
+	}
+	for _, inst := range s.adminBackend.GetInstances() {
+		s.instances[inst.Name] = inst
+	}
+	for _, cluster := range s.adminBackend.GetClusters() {
+		s.clusters[cluster.Name] = cluster
+	}
+	for _, appProfile := range s.adminBackend.GetAppProfiles() {
+		s.appProfiles[appProfile.Name] = appProfile
 	}
 }
 
@@ -300,6 +332,9 @@ func (s *server) dropCMVAllRows(fqSourceTable string) {
 }
 
 func (s *server) CreateTable(ctx context.Context, req *btapb.CreateTableRequest) (*btapb.Table, error) {
+	if err := s.localRequireInstance(req.Parent); err != nil {
+		return nil, err
+	}
 	tbl := req.Parent + "/tables/" + req.TableId
 
 	s.mu.Lock()
@@ -328,6 +363,9 @@ func (s *server) CreateTableFromSnapshot(context.Context, *btapb.CreateTableFrom
 }
 
 func (s *server) ListTables(ctx context.Context, req *btapb.ListTablesRequest) (*btapb.ListTablesResponse, error) {
+	if err := s.localRequireInstance(req.Parent); err != nil {
+		return nil, err
+	}
 	res := &btapb.ListTablesResponse{}
 	prefix := req.Parent + "/tables/"
 
@@ -356,6 +394,7 @@ func (s *server) GetTable(ctx context.Context, req *btapb.GetTableRequest) (*bta
 		Name:                  tbl,
 		ColumnFamilies:        toColumnFamilies(tblIns.columnFamilies()),
 		AutomatedBackupConfig: getAutomatedBackupConfig(tblIns.backupPolicy),
+		DeletionProtection:    tblIns.deletionProtection,
 	}, nil
 }
 
@@ -364,18 +403,30 @@ func (s *server) UpdateTable(ctx context.Context, req *btapb.UpdateTableRequest)
 		return nil, status.Errorf(codes.InvalidArgument, "update mask is required")
 	}
 	for _, path := range req.UpdateMask.GetPaths() {
-		if !strings.HasPrefix(path, "automated_backup_policy") {
-			return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support updates other than automated_backup_policy")
+		if !strings.HasPrefix(path, "automated_backup_policy") && path != "deletion_protection" {
+			return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support update field %q", path)
 		}
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tables[req.Table.Name].backupPolicy = getAutomatedBackupPolicy(req.Table)
+	tbl, ok := s.tables[req.Table.Name]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Table.Name)
+	}
+	for _, path := range req.UpdateMask.GetPaths() {
+		switch {
+		case strings.HasPrefix(path, "automated_backup_policy"):
+			tbl.backupPolicy = getAutomatedBackupPolicy(req.Table)
+		case path == "deletion_protection":
+			tbl.deletionProtection = req.Table.GetDeletionProtection()
+		}
+	}
 	ct := &btapb.Table{
 		Name:                  req.Table.Name,
 		ColumnFamilies:        req.GetTable().GetColumnFamilies(),
 		AutomatedBackupConfig: req.GetTable().GetAutomatedBackupConfig(),
+		DeletionProtection:    tbl.deletionProtection,
 	}
 
 	respAny, err := anypb.New(ct)
@@ -397,6 +448,9 @@ func (s *server) DeleteTable(ctx context.Context, req *btapb.DeleteTableRequest)
 	tbl, ok := s.tables[req.Name]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
+	}
+	if tbl.deletionProtection {
+		return nil, status.Errorf(codes.FailedPrecondition, "table %q has deletion protection enabled", req.Name)
 	}
 	s.tableBackend.Delete(tbl)
 	tbl.rows.DeleteAll()
@@ -582,29 +636,7 @@ func (s *server) DeleteSnapshot(context.Context, *btapb.DeleteSnapshotRequest) (
 	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support snapshots")
 }
 
-func (s *server) CreateBackup(context.Context, *btapb.CreateBackupRequest) (*longrunning.Operation, error) {
-	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support backups")
-}
-
-func (s *server) GetBackup(context.Context, *btapb.GetBackupRequest) (*btapb.Backup, error) {
-	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support backups")
-}
-
-func (s *server) UpdateBackup(context.Context, *btapb.UpdateBackupRequest) (*btapb.Backup, error) {
-	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support backups")
-}
-
-func (s *server) DeleteBackup(context.Context, *btapb.DeleteBackupRequest) (*emptypb.Empty, error) {
-	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support backups")
-}
-
-func (s *server) ListBackups(context.Context, *btapb.ListBackupsRequest) (*btapb.ListBackupsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support backups")
-}
-
-func (s *server) RestoreTable(context.Context, *btapb.RestoreTableRequest) (*longrunningpb.Operation, error) {
-	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support restores")
-}
+// Backup/restore methods moved to localcloud_backups.go
 
 func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRowsServer) error {
 	s.mu.Lock()
@@ -1153,6 +1185,8 @@ func (s *server) MutateRow(ctx context.Context, req *btpb.MutateRowRequest) (*bt
 	rowCopy := r.copy()
 	tbl.mu.Unlock()
 
+	s.localAppendChange(req.TableName, req.RowKey, req.Mutations)
+
 	// Propagate to CMV shadow tables.
 	if hasDeleteFromRow || rowCopy.isEmpty() {
 		s.deleteCMVRow(req.TableName, string(req.RowKey))
@@ -1224,6 +1258,7 @@ func (s *server) MutateRows(req *btpb.MutateRowsRequest, stream btpb.Bigtable_Mu
 				rowCopy: r.copy(),
 				deleted: deleted || r.isEmpty(),
 			})
+			s.localAppendChange(req.TableName, entry.RowKey, entry.Mutations)
 		}
 	}
 	tbl.mu.Unlock()
@@ -1299,6 +1334,8 @@ func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutate
 	}
 	rowCopy := r.copy()
 	tbl.mu.Unlock()
+
+	s.localAppendChange(req.TableName, req.RowKey, muts)
 
 	// Propagate to CMV shadow tables.
 	if hasDelete || rowCopy.isEmpty() {
@@ -1508,6 +1545,8 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 	rowCopy := r.copy()
 	tbl.mu.Unlock()
 
+	s.localAppendReadModifyWrite(req.TableName, req.RowKey, resultRow)
+
 	// Propagate to CMV shadow tables.
 	s.syncCMVRow(req.TableName, rowCopy)
 
@@ -1575,13 +1614,14 @@ func (s *server) SampleRowKeys(req *btpb.SampleRowKeysRequest, stream btpb.Bigta
 }
 
 type table struct {
-	parent       string
-	tableId      string
-	mu           sync.RWMutex
-	counter      uint64                   // increment by 1 when a new family is created
-	families     map[string]*columnFamily // keyed by plain family name
-	rows         *SqlRows                 // indexed by row key
-	backupPolicy *btapb.Table_AutomatedBackupPolicy
+	parent             string
+	tableId            string
+	mu                 sync.RWMutex
+	counter            uint64                   // increment by 1 when a new family is created
+	families           map[string]*columnFamily // keyed by plain family name
+	rows               *SqlRows                 // indexed by row key
+	backupPolicy       *btapb.Table_AutomatedBackupPolicy
+	deletionProtection bool
 }
 
 const btreeDegree = 16
@@ -1797,10 +1837,47 @@ func init() {
 func applyGC(cells []cell, rule *btapb.GcRule) ([]cell, bool) {
 	switch rule := rule.Rule.(type) {
 	default:
-		// TODO(dsymonds): Support GcRule_Intersection_
 		gcTypeWarn.Do(func() {
 			log.Printf("Unsupported GC rule type %T", rule)
 		})
+	case *btapb.GcRule_Intersection_:
+		// Intersection = AND: a cell is deleted only if ALL sub-rules would delete it.
+		// Equivalently, keep only cells that every sub-rule keeps.
+		if len(rule.Intersection.Rules) == 0 {
+			return cells, false
+		}
+		// Build a set of cells kept by each sub-rule, then intersect.
+		type cellID struct {
+			ts  int64
+			val string
+		}
+		kept := make(map[cellID]bool, len(cells))
+		for _, c := range cells {
+			kept[cellID{c.Ts, string(c.Value)}] = true
+		}
+		for _, sub := range rule.Intersection.Rules {
+			subKept, _ := applyGC(cells, sub)
+			subSet := make(map[cellID]bool, len(subKept))
+			for _, c := range subKept {
+				subSet[cellID{c.Ts, string(c.Value)}] = true
+			}
+			for id := range kept {
+				if !subSet[id] {
+					delete(kept, id)
+				}
+			}
+		}
+		if len(kept) == len(cells) {
+			return cells, false
+		}
+		result := make([]cell, 0, len(kept))
+		for _, c := range cells {
+			if kept[cellID{c.Ts, string(c.Value)}] {
+				result = append(result, c)
+			}
+		}
+		log.Printf("bttest: GC Intersection deleted %d cells.", len(cells)-len(result))
+		return result, true
 	case *btapb.GcRule_Union_:
 		var changed bool
 		for _, sub := range rule.Union.Rules {

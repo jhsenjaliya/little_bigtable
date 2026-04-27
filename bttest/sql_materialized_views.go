@@ -56,8 +56,8 @@ func (m *SqlMaterializedViews) Save(name, query string, deletionProtection bool)
 		dp = 1
 	}
 	_, err := m.db.Exec(
-		"INSERT OR REPLACE INTO materialized_views_t (name, query, deletion_protection) VALUES (?, ?, ?)",
-		name, query, dp,
+		bind("INSERT INTO materialized_views_t (name, query, deletion_protection) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET query = ?, deletion_protection = ?"),
+		name, query, dp, query, dp,
 	)
 	if err != nil {
 		log.Fatalf("saving materialized view %q: %v", name, err)
@@ -66,7 +66,7 @@ func (m *SqlMaterializedViews) Save(name, query string, deletionProtection bool)
 
 // Delete removes a materialized view record by its full resource name.
 func (m *SqlMaterializedViews) Delete(name string) {
-	_, err := m.db.Exec("DELETE FROM materialized_views_t WHERE name = ?", name)
+	_, err := m.db.Exec(bind("DELETE FROM materialized_views_t WHERE name = ?"), name)
 	if err != nil {
 		log.Fatal(err)
 	}

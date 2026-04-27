@@ -1,40 +1,140 @@
-# Little Bigtable
+# LocalCloud Bigtable Emulator
 
-![CI Status](https://github.com/bitly/little_bigtable/actions/workflows/test.yaml/badge.svg?branch=master)
+PostgreSQL-backed fork of [`bitly/little_bigtable`](https://github.com/bitly/little_bigtable), which itself is derived from Google's Bigtable `bttest` emulator.
 
-A local emulator for [Cloud Bigtable](https://cloud.google.com/bigtable) with persistence to a sqlite3 backend.
+This repo keeps LocalCloud-specific behavior isolated in `bttest/localcloud_*.go` where possible, so upstream `little_bigtable` syncs stay manageable.
 
-The Cloud SDK provided `cbtemulator` is in-memory and does not support persistence which limits it's applicability. This project is a fork of `cbtemulator` from [google-cloud-go/bigtable/bttest](https://github.com/googleapis/google-cloud-go/tree/c46c1c395b5f2fb89776a2d0e478e39a2d5572e4/bigtable/bttest)
-
-| | [`cbtemulator`](https://cloud.google.com/bigtable/docs/emulator) | "little" Bigtable | Bigtable
-| --- | ----- | ---- | ----
-| **Storage** | In-Memory | sqlite3 | Distributed GFS
-| **Type** | Emulator | Emulator | Managed Production Datastore
-| **Scaling**| Single process | Single process | Scalable multi-node backend
-| **GC** | async GC | per-row GC at read time |
-
-## Usage
-
-```
-Usage of ./little_bigtable:
-  -db-file string
-      path to data file (default "little_bigtable.db")
-  -host string
-      the address to bind to on the local machine (default "localhost")
-  -port int
-      the port number to bind to on the local machine (default 9000)
-  -version
-      show version
-```
-
-In the environment for your application, set the `BIGTABLE_EMULATOR_HOST` environment variable to the host and port where `little_bigtable` is running. This environment variable is automatically detected by the Bigtable SDK or the `cbt` CLI. For example:
+## Build
 
 ```bash
-$ export BIGTABLE_EMULATOR_HOST="127.0.0.1:9000"
-$ ./run_my_app
+docker build --pull=false -t bigtable-emulator-extended:latest .
 ```
 
-## Limitations
+The Dockerfile defaults to Public ECR's Docker official image mirror for base
+images to avoid Docker Hub auth/DNS failures in constrained networks. Override
+the base images when needed:
 
-Some filters are not implemented or have partial support. See [cbtemulator docs](https://cloud.google.com/bigtable/docs/emulator#filters)
+```bash
+docker build \
+  --build-arg GO_BASE_IMAGE=golang:1.25-alpine \
+  --build-arg RUNTIME_BASE_IMAGE=alpine:3.22 \
+  -t bigtable-emulator-extended:latest .
+```
 
+If Go module downloads fail on corporate TLS inspection, pass the local CA
+bundle as a BuildKit secret:
+
+```bash
+docker build --pull=false \
+  --secret id=ca_bundle,src="$HOME/paypal-ca-bundle.pem" \
+  -t bigtable-emulator-extended:latest .
+```
+
+### Offline Builds
+
+Offline builds require no network access during `docker build`. Dependencies
+must be staged into the build context beforehand (default: `.docker/offline-go/`,
+already gitignored).
+
+**Prerequisites** — always run these first to ensure `go.sum` is complete:
+
+```bash
+go mod tidy
+```
+
+#### Option A: Vendor bundle (recommended)
+
+Copies all dependencies as source into a `vendor/` directory. Most reliable —
+no module cache subtleties.
+
+```bash
+rm -rf .docker/offline-go/vendor
+go mod vendor -o .docker/offline-go/vendor
+
+docker build --pull=false \
+  --build-arg GO_OFFLINE=true \
+  -t bigtable-emulator-extended:latest .
+```
+
+#### Option B: Module cache copy
+
+Copies your local `$GOMODCACHE` into the build context. Uses more disk but
+preserves the exact cache layout.
+
+```bash
+rm -rf .docker/offline-go/mod
+mkdir -p .docker/offline-go/mod
+rsync -a "$(go env GOMODCACHE)/" .docker/offline-go/mod/
+
+docker build --pull=false \
+  --build-arg GO_OFFLINE=true \
+  -t bigtable-emulator-extended:latest .
+```
+
+#### Make shortcut
+
+```bash
+make docker-build-offline                  # uses vendor if present, mod cache otherwise
+```
+
+#### Troubleshooting offline builds
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `missing go.sum entry for module` | `go.sum` incomplete | Run `go mod tidy` before staging deps |
+| `GO_OFFLINE=true requires .docker/offline-go/vendor or .../mod` | No deps staged | Run Option A or B above |
+| `cannot find module providing package ...` | Stale vendor/cache | Re-run `go mod vendor` or `rsync` |
+
+LocalCloud's Dockerfile consumes that image as a named build stage:
+
+```bash
+docker build \
+  --build-arg BIGTABLE_EMULATOR_IMAGE=bigtable-emulator-extended:latest \
+  -t localcloud/localcloud:latest \
+  /Users/jsenjaliya/src/my/localcloud
+```
+
+## Run
+
+```bash
+bigtable-emulator-extended \
+  -host 0.0.0.0 \
+  -port 8087 \
+  -database-driver postgres \
+  -database-url 'postgres://localcloud@localhost/localcloud?sslmode=disable' \
+  -strict-admin=true
+```
+
+Then point SDKs at:
+
+```bash
+export BIGTABLE_EMULATOR_HOST=localhost:8087
+```
+
+## Scope
+
+Supported:
+
+- Bigtable table/data APIs inherited from `little_bigtable`
+- PostgreSQL persistence for tables, rows, admin metadata, and changelog records
+- Instance, cluster, and app profile metadata APIs for local validation
+- Minimal change stream RPCs with one stable full-table partition
+
+Explicitly unsupported:
+
+- IAM enforcement
+- CMEK
+- backups/restore
+- replication behavior
+- autoscaling
+- Data Boost
+- distributed tablet split/merge behavior
+- GoogleSQL for Bigtable
+
+## Upstream Sync Policy
+
+Keep upstream-derived files close to `little_bigtable`. New behavior should prefer:
+
+- new `bttest/localcloud_*.go` files
+- small delegation hooks in upstream files
+- minimal SQL dialect helpers instead of broad rewrites

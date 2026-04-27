@@ -1,4 +1,4 @@
-module github.com/localcloud/bigtable-emulator-extended
+module github.com/jhsenjaliya/little_bigtable
 
 go 1.25.0
 

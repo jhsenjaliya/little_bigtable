@@ -12,7 +12,7 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/localcloud/bigtable-emulator-extended/bttest"
+	"github.com/jhsenjaliya/little_bigtable/bttest"
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
 	"google.golang.org/grpc"

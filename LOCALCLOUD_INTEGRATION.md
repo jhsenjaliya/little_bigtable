@@ -75,7 +75,7 @@ docker build --pull=false \
 #### Make shortcut
 
 ```bash
-make docker-build-offline
+make -f Makefile.localcloud docker-build-offline
 ```
 
 #### Troubleshooting offline builds

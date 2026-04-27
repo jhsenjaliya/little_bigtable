@@ -1,0 +1,17 @@
+# LocalCloud-specific build targets.
+# Usage: make -f Makefile.localcloud <target>
+
+IMAGE ?= bigtable-emulator-extended:latest
+GO_OFFLINE ?= false
+GO_OFFLINE_DEPS_DIR ?= .docker/offline-go
+
+docker-build:
+	docker build --pull=false \
+		--build-arg GO_OFFLINE=$(GO_OFFLINE) \
+		--build-arg GO_OFFLINE_DEPS_DIR=$(GO_OFFLINE_DEPS_DIR) \
+		-t $(IMAGE) .
+
+docker-build-offline:
+	$(MAKE) -f Makefile.localcloud docker-build GO_OFFLINE=true
+
+.PHONY: docker-build docker-build-offline

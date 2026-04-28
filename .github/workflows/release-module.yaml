@@ -21,24 +21,27 @@ on:
 permissions:
   contents: write
 
+env:
+  GOTOOLCHAIN: auto
+
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    container: golang:1.24
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.branch || github.ref }}
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
       - name: Install C compiler (required for go-sqlite3)
-        run: apt-get update && apt-get install -y gcc
+        run: sudo apt-get update && sudo apt-get install -y gcc
 
       - name: Build
         run: go build -buildvcs=false ./...
-
-      - name: Fix git ownership
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Test
         run: go test -buildvcs=false ./bttest/ -count=1 -timeout 120s -v
@@ -89,8 +92,11 @@ jobs:
     needs: tag-and-release
     if: always() && (needs.tag-and-release.result == 'success' || github.event_name == 'push')
     runs-on: ubuntu-latest
-    container: golang:1.24
     steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
       - name: Determine version
         id: version
         run: |
@@ -150,7 +156,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.goos == 'linux' && matrix.goarch == 'amd64' && '1' || '0' }}
         run: |
-          go build -trimpath -ldflags="-s -w" \
+          go build -buildvcs=false -trimpath -ldflags="-s -w" \
             -o little_bigtable-${{ matrix.goos }}-${{ matrix.goarch }} .
 
       - name: Upload binary to release

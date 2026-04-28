@@ -1,6 +1,6 @@
 module github.com/jhsenjaliya/little_bigtable
 
-go 1.25.0
+go 1.23
 
 require (
 	cloud.google.com/go/bigtable v1.46.0

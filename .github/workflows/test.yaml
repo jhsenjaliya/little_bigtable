@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go-version: ['1.25', '1.26']
+        go-version: ['1.23', '1.24']
         goarch: ['amd64']
 
     steps:
@@ -24,9 +24,9 @@ jobs:
       - name: Build
         env:
           GOARCH: ${{ matrix.goarch }}
-        run: go build ./...
+        run: go build -buildvcs=false ./...
 
       - name: Test
         env:
           GOARCH: ${{ matrix.goarch }}
-        run: go test ./bttest/ -count=1 -timeout 120s -v
+        run: go test -buildvcs=false ./bttest/ -count=1 -timeout 120s -v

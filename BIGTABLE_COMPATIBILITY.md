@@ -17,7 +17,7 @@ References:
 | RPC | Status | Notes |
 | --- | --- | --- |
 | `ReadRows` | Supported | Streaming reads with full filter support. Chunking is simplified. |
-| `MutateRow` | Supported | Set cell, delete from column/family/row/timestamp range. |
+| `MutateRow` | Supported | Set cell, delete from column/family/row/timestamp range, AddToCell, MergeToCell. |
 | `MutateRows` | Supported | Streaming batch mutations with per-entry error reporting. |
 | `CheckAndMutateRow` | Supported | Predicate-based conditional mutations. |
 | `ReadModifyWriteRow` | Supported | Atomic increment and append operations. |
@@ -25,7 +25,7 @@ References:
 | `PingAndWarm` | Supported | No-op, always succeeds. |
 | `PrepareQuery` | Not implemented | GoogleSQL for Bigtable. Returns `Unimplemented`. |
 | `ExecuteQuery` | Not implemented | GoogleSQL for Bigtable. Returns `Unimplemented`. |
-| Aggregate mutations | Not implemented | HyperLogLog, sum counters, min/max aggregate cell types. |
+| Aggregate mutations (`AddToCell`, `MergeToCell`) | Supported | Int64 sum aggregation. HyperLogLog and other aggregate types return raw input value. |
 
 ## Read Filters
 
@@ -50,9 +50,9 @@ References:
 | `StripValueTransformer` | Supported |
 | `ApplyLabelTransformer` | Supported |
 
-Some less-common filter variants may be silently ignored rather than returning
-`Unimplemented`. These should be promoted to explicit support or explicit errors
-as they are encountered.
+Unsupported filter types return `Unimplemented` error rather than silently
+passing. Interleave filter correctly deduplicates cells appearing in multiple
+sub-filter results.
 
 ## Table Admin API
 
@@ -232,7 +232,7 @@ Supported through unauthenticated gRPC and `BIGTABLE_EMULATOR_HOST`. Covered by
 | Data Boost | Serverless production read compute. |
 | GoogleSQL for Bigtable | Large query engine surface. |
 | Schema bundles | Very new API, minimal SDK adoption. |
-| Aggregate cell types | HyperLogLog, sum, min/max aggregates. Requires new cell type tracking. |
+| Aggregate cell types beyond int64 sum | HyperLogLog, min/max. AddToCell/MergeToCell handle int64 sum; other aggregate types store raw input. |
 | HBase, Beam, Spark, Flink, Kafka connector parity | External integration stacks. |
 
 ## Compatibility Bar

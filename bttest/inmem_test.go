@@ -79,7 +79,6 @@ func newTestServer(t *testing.T) *server {
 		db:           db,
 		tableBackend: NewSqlTables(db),
 		adminBackend: NewSqlAdminMetadata(db),
-		changeLog:    NewSqlChangeLog(db),
 		mvBackend:    NewSqlMaterializedViews(db),
 		cmvs:         newCMVRegistry(),
 	}
@@ -1076,8 +1075,13 @@ func TestReadRowsOrder(t *testing.T) {
 	if len(mock.responses) == 0 {
 		t.Fatal("Response count: got 0, want > 0")
 	}
-	if len(mock.responses[0].Chunks) != 16 {
-		t.Fatalf("Chunk count: got %d, want 16", len(mock.responses[0].Chunks))
+	// Interleave returns the union of cells matching either sub-filter.
+	// cf1 family match: 9 cells (3 cols × 3 versions)
+	// col2 qualifier match outside cf1: cf0/col2 (1 cell, GC'd) + cf2/col2 (3 cells) = 4
+	// cf1/col2 cells appear in both sub-filters but are deduplicated.
+	// Total: 9 + 4 = 13
+	if len(mock.responses[0].Chunks) != 13 {
+		t.Fatalf("Chunk count: got %d, want 13", len(mock.responses[0].Chunks))
 	}
 	testOrder(mock)
 

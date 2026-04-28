@@ -1,8 +1,53 @@
 # LocalCloud Integration Guide
 
-This document covers how to integrate the Bigtable emulator into LocalCloud and
-other Go projects as a library, how to release new versions, and Docker image
-builds for standalone deployment.
+This document covers how to build the Bigtable emulator from source, integrate
+it into Go projects as a library, release new versions, and build Docker images.
+
+## Building from Source
+
+### Prerequisites
+
+- Go 1.25+
+- C compiler (`gcc` or `clang`) — required for SQLite via `go-sqlite3`
+- macOS: `xcode-select --install`
+- Ubuntu/Debian: `apt-get install gcc`
+- Alpine: `apk add gcc musl-dev`
+
+### Build the binary
+
+```bash
+make
+# Output: build/little_bigtable
+```
+
+Or directly:
+
+```bash
+go build -o little_bigtable .
+```
+
+### Build a static binary (for containers)
+
+```bash
+CGO_ENABLED=1 go build \
+  -trimpath \
+  -ldflags="-s -w -linkmode external -extldflags -static" \
+  -o little_bigtable .
+```
+
+Requires static libc (Alpine: `musl-dev`, Debian: install `musl-tools`).
+
+### Run tests
+
+```bash
+go test ./bttest/ -count=1 -timeout 60s
+```
+
+### Verify build
+
+```bash
+./build/little_bigtable -version
+```
 
 ## Go Library (Recommended)
 

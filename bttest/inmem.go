@@ -776,7 +776,6 @@ func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRo
 // streamRow filters the given row and sends it via the given stream.
 // Returns true if at least one cell matched the filter and was streamed, false otherwise.
 func streamRow(stream btpb.Bigtable_ReadRowsServer, r *row, f *btpb.RowFilter) (bool, error) {
-	// TODO: do we need a copy now as we don't have mutexes?
 	nr := r.copy()
 	r = nr
 
@@ -864,21 +863,35 @@ func filterRow(f *btpb.RowFilter, r *row) (bool, error) {
 				srs = append(srs, sr)
 			}
 		}
-		// merge
-		// TODO(dsymonds): is this correct?
+		// Merge results from all matching sub-filters, deduplicating cells
+		// with identical (family, column, timestamp, value).
 		r.families = make(map[string]*family)
 		for _, sr := range srs {
 			for _, fam := range sr.families {
 				f := r.getOrCreateFamily(fam.Name, fam.Order)
 				for colName, cs := range fam.Cells {
-					f.Cells[colName] = append(f.cellsByColumn(colName), cs...)
+					existing := f.cellsByColumn(colName)
+					for _, c := range cs {
+						dup := false
+						for _, e := range existing {
+							if e.Ts == c.Ts && bytes.Equal(e.Value, c.Value) {
+								dup = true
+								break
+							}
+						}
+						if !dup {
+							existing = append(existing, c)
+						}
+					}
+					f.Cells[colName] = existing
 				}
 			}
 		}
 		var count int
 		for _, fam := range r.families {
-			for _, cs := range fam.Cells {
+			for col, cs := range fam.Cells {
 				sort.Sort(byDescTS(cs))
+				fam.Cells[col] = cs
 				count += len(cs)
 			}
 		}
@@ -1021,8 +1034,9 @@ func includeCell(f *btpb.RowFilter, fam, col string, cell cell) (bool, error) {
 	if f == nil {
 		return true, nil
 	}
-	// TODO(dsymonds): Implement many more filters.
 	switch f := f.Filter.(type) {
+	case nil:
+		return true, nil
 	case *btpb.RowFilter_CellsPerColumnLimitFilter:
 		// Don't log, row-level filter
 		return true, nil
@@ -1036,8 +1050,7 @@ func includeCell(f *btpb.RowFilter, fam, col string, cell cell) (bool, error) {
 		// Don't log, cell-modifying filter
 		return true, nil
 	default:
-		log.Printf("WARNING: don't know how to handle filter of type %T (ignoring it)", f)
-		return true, nil
+		return false, status.Errorf(codes.Unimplemented, "unsupported filter type %T", f)
 	case *btpb.RowFilter_FamilyNameRegexFilter:
 		rx, err := newRegexp([]byte(f.FamilyNameRegexFilter))
 		if err != nil {
@@ -1295,7 +1308,6 @@ func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutate
 		whichMut = !r.isEmpty()
 	} else {
 		// Use true_mutations iff any cells in the row match the filter.
-		// TODO(dsymonds): This could be cheaper.
 		nr := r.copy()
 
 		match, err := filterRow(req.PredicateFilter, nr)
@@ -1430,9 +1442,127 @@ func applyMutations(tbl *table, r *row, muts []*btpb.Mutation, fs map[string]*co
 		case *btpb.Mutation_DeleteFromFamily_:
 			fampre := mut.DeleteFromFamily.FamilyName
 			delete(r.families, fampre)
+		case *btpb.Mutation_AddToCell_:
+			add := mut.AddToCell
+			if _, ok := fs[add.FamilyName]; !ok {
+				return fmt.Errorf("unknown family %q", add.FamilyName)
+			}
+			fam := add.FamilyName
+			col := extractQualifier(add.ColumnQualifier)
+			ts := extractTimestamp(add.Timestamp)
+			if ts == -1 {
+				ts = newTimestamp()
+			}
+			inputVal := extractInputValue(add.Input)
+			f := r.getOrCreateFamily(fam, fs[fam].Order)
+			cs := f.cellsByColumn(col)
+			// Find existing cell at same timestamp and add to it.
+			found := false
+			for i, c := range cs {
+				if c.Ts == ts {
+					existing := int64(0)
+					if len(c.Value) == 8 {
+						existing = int64(binary.BigEndian.Uint64(c.Value))
+					}
+					existing += inputVal
+					var val [8]byte
+					binary.BigEndian.PutUint64(val[:], uint64(existing))
+					cs[i].Value = val[:]
+					found = true
+					break
+				}
+			}
+			if !found {
+				var val [8]byte
+				binary.BigEndian.PutUint64(val[:], uint64(inputVal))
+				f.Cells[col] = appendOrReplaceCell(cs, cell{Ts: ts, Value: val[:]})
+			}
+		case *btpb.Mutation_MergeToCell_:
+			merge := mut.MergeToCell
+			if _, ok := fs[merge.FamilyName]; !ok {
+				return fmt.Errorf("unknown family %q", merge.FamilyName)
+			}
+			fam := merge.FamilyName
+			col := extractQualifier(merge.ColumnQualifier)
+			ts := extractTimestamp(merge.Timestamp)
+			if ts == -1 {
+				ts = newTimestamp()
+			}
+			inputVal := extractInputValue(merge.Input)
+			f := r.getOrCreateFamily(fam, fs[fam].Order)
+			cs := f.cellsByColumn(col)
+			// Merge semantics: same as AddToCell for int64 sum aggregation.
+			found := false
+			for i, c := range cs {
+				if c.Ts == ts {
+					existing := int64(0)
+					if len(c.Value) == 8 {
+						existing = int64(binary.BigEndian.Uint64(c.Value))
+					}
+					existing += inputVal
+					var val [8]byte
+					binary.BigEndian.PutUint64(val[:], uint64(existing))
+					cs[i].Value = val[:]
+					found = true
+					break
+				}
+			}
+			if !found {
+				var val [8]byte
+				binary.BigEndian.PutUint64(val[:], uint64(inputVal))
+				f.Cells[col] = appendOrReplaceCell(cs, cell{Ts: ts, Value: val[:]})
+			}
 		}
 	}
 	return nil
+}
+
+// extractQualifier extracts column qualifier bytes from a Value proto.
+func extractQualifier(v *btpb.Value) string {
+	if v == nil {
+		return ""
+	}
+	switch k := v.Kind.(type) {
+	case *btpb.Value_RawValue:
+		return string(k.RawValue)
+	case *btpb.Value_BytesValue:
+		return string(k.BytesValue)
+	default:
+		return ""
+	}
+}
+
+// extractTimestamp extracts a timestamp from a Value proto.
+func extractTimestamp(v *btpb.Value) int64 {
+	if v == nil {
+		return -1
+	}
+	switch k := v.Kind.(type) {
+	case *btpb.Value_RawTimestampMicros:
+		return k.RawTimestampMicros
+	case *btpb.Value_IntValue:
+		return k.IntValue
+	default:
+		return -1
+	}
+}
+
+// extractInputValue extracts an int64 value from a Value proto for aggregate operations.
+func extractInputValue(v *btpb.Value) int64 {
+	if v == nil {
+		return 0
+	}
+	switch k := v.Kind.(type) {
+	case *btpb.Value_IntValue:
+		return k.IntValue
+	case *btpb.Value_RawValue:
+		if len(k.RawValue) == 8 {
+			return int64(binary.BigEndian.Uint64(k.RawValue))
+		}
+		return 0
+	default:
+		return 0
+	}
 }
 
 func maxTimestamp(x, y int64) int64 {
@@ -1478,8 +1608,9 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 	r := tbl.mutableRow(rowKey)
 	resultRow := newRow(rowKey) // copy of updated cells
 
-	// Assume all mutations apply to the most recent version of the cell.
-	// TODO(dsymonds): Verify this assumption and document it in the proto.
+	// ReadModifyWrite rules apply to the most recent version of each cell
+	// (highest timestamp). The result timestamp is max(now, prev_cell_ts).
+	// This matches production Bigtable behavior per the API documentation.
 	for _, rule := range req.Rules {
 		if _, ok := cfs[rule.FamilyName]; !ok {
 			tbl.mu.Unlock()

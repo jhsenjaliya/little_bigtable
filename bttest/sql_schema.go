@@ -44,5 +44,16 @@ func CreateTables(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+
+	query = "CREATE TABLE IF NOT EXISTS instances_t (\n" +
+		"`parent` TEXT NOT NULL,\n" +
+		"`instance_id` TEXT NOT NULL,\n" +
+		"`metadata` BLOB NOT NULL,\n" +
+		"PRIMARY KEY (`parent`, `instance_id`)\n" +
+		")"
+	_, err = db.ExecContext(ctx, query)
+	if err != nil {
+		return err
+	}
 	return nil
 }

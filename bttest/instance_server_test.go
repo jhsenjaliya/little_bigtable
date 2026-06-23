@@ -16,32 +16,58 @@ package bttest
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"testing"
 
 	btapb "cloud.google.com/go/bigtable/admin/apiv2/adminpb"
+	_ "github.com/mattn/go-sqlite3"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-func TestDeleteInstance(t *testing.T) {
-	srv := &server{
-		instances: map[string]*btapb.Instance{
-			"projects/test/instances/a1042-instance": {
-				Name:        "projects/test/instances/a1042-instance/test1",
-				DisplayName: "test1",
-				State:       btapb.Instance_READY,
-				Labels: map[string]string{
-					"component":   "ingest",
-					"cost-center": "sales",
-				},
-			},
-		},
+func newInstanceTestServer(t *testing.T) *server {
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared", newDBFile(t)))
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { db.Close() })
+	db.SetMaxOpenConns(1)
+	CreateTables(context.Background(), db)
+
+	return &server{
+		tables:            make(map[string]*table),
+		instances:         make(map[string]*btapb.Instance),
+		materializedViews: make(map[string]*btapb.MaterializedView),
+		db:                db,
+		tableBackend:      NewSqlTables(db),
+		mvBackend:         NewSqlMaterializedViews(db),
+		instanceBackend:   NewSqlInstances(db),
+		cmvs:              newCMVRegistry(),
+	}
+}
+
+func TestDeleteInstance(t *testing.T) {
+	srv := newInstanceTestServer(t)
 
 	ctx := context.Background()
 
+	// Pre-populate an instance in memory and SQLite.
+	name := "projects/test/instances/a1042-instance"
+	inst := &btapb.Instance{
+		Name:        name,
+		DisplayName: "test1",
+		State:       btapb.Instance_READY,
+		Labels: map[string]string{
+			"component":   "ingest",
+			"cost-center": "sales",
+		},
+	}
+	srv.instances[name] = inst
+	srv.instanceBackend.Save("projects/test", "a1042-instance", inst)
+
 	// 1. Deletion of a just created instance should succeed.
-	delReq := &btapb.DeleteInstanceRequest{Name: "projects/test/instances/a1042-instance"}
+	delReq := &btapb.DeleteInstanceRequest{Name: name}
 	if _, err := srv.DeleteInstance(ctx, delReq); err != nil {
 		t.Fatalf("Unexpected failed to delete the newly created instance: %v", err)
 	}
@@ -79,7 +105,7 @@ func TestDeleteInstance(t *testing.T) {
 		}
 
 		wantMsg := "Error in field 'instance_name' : Invalid name for collection instances : " +
-			"Should match " + `^projects/[a-z][a-z0-9\\-]+[a-z0-9]/instances/[a-z][a-z0-9\\-]+[a-z0-9]$` +
+			"Should match " + instanceNameRegRaw +
 			" but found '" + invalidName + "'"
 		if g, w := gstatus.Message(), wantMsg; g != w {
 			t.Errorf("%q: mismatched status message\ngot  %q\nwant %q\n\n", invalidName, g, w)

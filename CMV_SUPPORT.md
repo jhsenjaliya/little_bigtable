@@ -72,6 +72,16 @@ row, err := table.ReadRow(ctx, "region-a#account-42#...")
 - `bttest/instance_server.go` — Implemented CreateMaterializedView, GetMaterializedView,
   ListMaterializedViews, UpdateMaterializedView (DeletionProtection only), DeleteMaterializedView
 
+### Recent Additions (2026-06)
+- `bttest/sql_instances.go` — Persistent instance metadata backend (SQLite-backed)
+- `bttest/sql_schema.go` — Added `instances_t` table schema
+- `bttest/inmem.go` — Switched to `UnimplementedXxxServer` embedding for forward-compatible safety;
+  added `instanceBackend` and `LoadInstances`; added Sink filter support
+- `bttest/instance_server.go` — Implemented CreateInstance, GetInstance, ListInstances, UpdateInstance;
+  updated DeleteInstance to cascade-delete tables and persist to SQLite
+- `bttest/inmem_test.go` — Added `TestInstancePersistence` integration test
+- `bttest/instance_server_test.go` — Updated to use SQLite-backed test server
+
 ## Known Limitations
 
 - **SQL parser**: CMV SQL is parsed with regex scoped to the standard Bigtable CMV format.

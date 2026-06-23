@@ -93,16 +93,16 @@ type server struct {
 	instances    map[string]*btapb.Instance // keyed by fully qualified name
 	gcc          chan int                   // set when gcloop starts, closed when server shuts down
 	db           *sql.DB
-	tableBackend *SqlTables
-	mvBackend    *SqlMaterializedViews
-	cmvs         *cmvRegistry
+	tableBackend    *SqlTables
+	mvBackend       *SqlMaterializedViews
+	instanceBackend *SqlInstances
+	cmvs            *cmvRegistry
 
 	materializedViews map[string]*btapb.MaterializedView // keyed by full resource name
 
-	// Any unimplemented methods will cause a panic.
-	btapb.BigtableTableAdminServer
-	btapb.BigtableInstanceAdminServer
-	btpb.BigtableServer
+	btapb.UnimplementedBigtableTableAdminServer
+	btapb.UnimplementedBigtableInstanceAdminServer
+	btpb.UnimplementedBigtableServer
 }
 
 // NewServer creates a new Server.
@@ -121,10 +121,10 @@ func NewServer(laddr string, db *sql.DB, opt ...grpc.ServerOption) (*Server, err
 		s: &server{
 			tables:            make(map[string]*table),
 			instances:         make(map[string]*btapb.Instance),
-			materializedViews: make(map[string]*btapb.MaterializedView),
 			db:                db,
 			tableBackend:      NewSqlTables(db),
 			mvBackend:         NewSqlMaterializedViews(db),
+			instanceBackend:   NewSqlInstances(db),
 			cmvs:              newCMVRegistry(),
 		},
 	}
@@ -134,6 +134,7 @@ func NewServer(laddr string, db *sql.DB, opt ...grpc.ServerOption) (*Server, err
 	longrunningpb.RegisterOperationsServer(s.srv, opsServer)
 	s.s.LoadTables()
 	s.s.LoadMaterializedViews()
+	s.s.LoadInstances()
 	btapb.RegisterBigtableInstanceAdminServer(s.srv, s.s)
 	btapb.RegisterBigtableTableAdminServer(s.srv, s.s)
 	btpb.RegisterBigtableServer(s.srv, s.s)
@@ -179,6 +180,13 @@ func (s *server) LoadMaterializedViews() {
 			Query:              v.query,
 			DeletionProtection: v.deletionProtection,
 		}
+	}
+}
+
+// LoadInstances restores persisted instance metadata from SQLite on startup.
+func (s *server) LoadInstances() {
+	for name, inst := range s.instanceBackend.GetAll() {
+		s.instances[name] = inst
 	}
 }
 
@@ -801,6 +809,16 @@ func filterRow(f *btpb.RowFilter, r *row) (bool, error) {
 	case *btpb.RowFilter_PassAllFilter:
 		if !f.PassAllFilter {
 			return false, status.Errorf(codes.InvalidArgument, "pass_all_filter must be true if set")
+		}
+		return true, nil
+	case *btpb.RowFilter_Sink:
+		// Sink filter advances the output cursor but suppresses cell output.
+		// When true: still "matches" for chain semantics, but contributes nothing.
+		// When false: passes through (no-op).
+		// Do NOT clear r.families — that would destroy the row for subsequent
+		// Chain filters that share the same row reference.
+		if !f.Sink {
+			return true, nil
 		}
 		return true, nil
 	case *btpb.RowFilter_Chain_:

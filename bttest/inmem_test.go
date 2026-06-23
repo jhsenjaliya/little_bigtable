@@ -75,11 +75,13 @@ func newTestServer(t *testing.T) *server {
 	CreateTables(context.Background(), db)
 
 	s := &server{
-		tables:       make(map[string]*table),
-		db:           db,
-		tableBackend: NewSqlTables(db),
-		mvBackend:    NewSqlMaterializedViews(db),
-		cmvs:         newCMVRegistry(),
+		tables:          make(map[string]*table),
+		instances:       make(map[string]*btapb.Instance),
+		db:              db,
+		tableBackend:    NewSqlTables(db),
+		mvBackend:       NewSqlMaterializedViews(db),
+		instanceBackend: NewSqlInstances(db),
+		cmvs:            newCMVRegistry(),
 	}
 	return s
 }
@@ -2351,5 +2353,75 @@ func TestFilterRowCellsPerRowLimitFilterTruthiness(t *testing.T) {
 		if got != test.want {
 			t.Errorf("%s: got %t, want %t", proto.CompactTextString(test.filter), got, test.want)
 		}
+	}
+}
+
+func TestInstancePersistence(t *testing.T) {
+	ctx := context.Background()
+	dbFile := newDBFile(t)
+
+	// First session: create an instance.
+	db1, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared", dbFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db1.SetMaxOpenConns(1)
+	CreateTables(ctx, db1)
+
+	srv1 := &server{
+		tables:          make(map[string]*table),
+		instances:       make(map[string]*btapb.Instance),
+		db:              db1,
+		tableBackend:    NewSqlTables(db1),
+		mvBackend:       NewSqlMaterializedViews(db1),
+		instanceBackend: NewSqlInstances(db1),
+		cmvs:            newCMVRegistry(),
+	}
+
+	_, err = srv1.CreateInstance(ctx, &btapb.CreateInstanceRequest{
+		Parent:     "projects/test-proj",
+		InstanceId: "persist-instance",
+		Instance: &btapb.Instance{
+			DisplayName: "Persisted Instance",
+			Type:        btapb.Instance_DEVELOPMENT,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateInstance failed: %v", err)
+	}
+	db1.Close()
+
+	// Second session: reopen the DB and verify the instance is restored.
+	db2, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared", dbFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	db2.SetMaxOpenConns(1)
+
+	srv2 := &server{
+		tables:          make(map[string]*table),
+		instances:       make(map[string]*btapb.Instance),
+		db:              db2,
+		tableBackend:    NewSqlTables(db2),
+		mvBackend:       NewSqlMaterializedViews(db2),
+		instanceBackend: NewSqlInstances(db2),
+		cmvs:            newCMVRegistry(),
+	}
+	srv2.LoadInstances()
+
+	name := "projects/test-proj/instances/persist-instance"
+	inst, ok := srv2.instances[name]
+	if !ok {
+		t.Fatalf("instance %q not restored after restart", name)
+	}
+	if inst.DisplayName != "Persisted Instance" {
+		t.Errorf("DisplayName = %q, want %q", inst.DisplayName, "Persisted Instance")
+	}
+	if inst.Type != btapb.Instance_DEVELOPMENT {
+		t.Errorf("Type = %v, want %v", inst.Type, btapb.Instance_DEVELOPMENT)
+	}
+	if inst.State != btapb.Instance_READY {
+		t.Errorf("State = %v, want %v", inst.State, btapb.Instance_READY)
 	}
 }

@@ -32,28 +32,6 @@ import (
 
 var _ btapb.BigtableInstanceAdminServer = (*server)(nil)
 
-var errUnimplemented = status.Error(codes.Unimplemented, "unimplemented feature")
-
-func (s *server) CreateInstance(ctx context.Context, req *btapb.CreateInstanceRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) GetInstance(ctx context.Context, req *btapb.GetInstanceRequest) (*btapb.Instance, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) ListInstances(ctx context.Context, req *btapb.ListInstancesRequest) (*btapb.ListInstancesResponse, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) UpdateInstance(ctx context.Context, req *btapb.Instance) (*btapb.Instance, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) PartialUpdateInstance(ctx context.Context, req *btapb.PartialUpdateInstanceRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
-}
-
 var (
 	// As per https://godoc.org/google.golang.org/genproto/googleapis/bigtable/admin/v2#DeleteInstanceRequest.Name
 	// the Name should be of the form:
@@ -61,6 +39,165 @@ var (
 	instanceNameRegRaw = `^projects/[a-z][a-z0-9\\-]+[a-z0-9]/instances/[a-z][a-z0-9\\-]+[a-z0-9]$`
 	regInstanceName    = regexp.MustCompile(instanceNameRegRaw)
 )
+
+// createInstanceName builds a fully qualified instance resource name.
+func createInstanceName(projectId, instanceId string) string {
+	return "projects/" + projectId + "/instances/" + instanceId
+}
+
+func (s *server) CreateInstance(ctx context.Context, req *btapb.CreateInstanceRequest) (*longrunning.Operation, error) {
+	if req.InstanceId == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "instance_id is required")
+	}
+	// Validate parent matches expected project pattern.
+	parentRE := regexp.MustCompile(`^projects/[a-z][a-z0-9\-]+[a-z0-9]$`)
+	if !parentRE.MatchString(req.Parent) {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"invalid parent %q: must match projects/{project}", req.Parent)
+	}
+	inst := req.GetInstance()
+	if inst == nil {
+		inst = &btapb.Instance{}
+	}
+	name := createInstanceName(instanceNameFromParent(req.Parent), req.InstanceId)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.instances[name]; exists {
+		return nil, status.Errorf(codes.AlreadyExists, "instance %q already exists", name)
+	}
+
+	// Build the instance object with provided or default values.
+	displayName := inst.DisplayName
+	if displayName == "" {
+		displayName = req.InstanceId
+	}
+	instType := inst.Type
+	if instType == btapb.Instance_TYPE_UNSPECIFIED {
+		instType = btapb.Instance_PRODUCTION
+	}
+
+	stored := &btapb.Instance{
+		Name:        name,
+		DisplayName: displayName,
+		Type:        instType,
+		State:       btapb.Instance_READY,
+		Labels:      inst.Labels,
+	}
+
+	if err := s.instanceBackend.Save(instanceNameFromParent(req.Parent), req.InstanceId, stored); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to persist instance: %v", err)
+	}
+	s.instances[name] = stored
+
+	respAny, err := anypb.New(stored)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to wrap result: %v", err)
+	}
+	return &longrunning.Operation{
+		Name:   fmt.Sprintf("operations/op-%d", time.Now().UnixNano()),
+		Done:   true,
+		Result: &longrunning.Operation_Response{Response: respAny},
+	}, nil
+}
+
+func (s *server) GetInstance(ctx context.Context, req *btapb.GetInstanceRequest) (*btapb.Instance, error) {
+	name := req.GetName()
+	if !regInstanceName.Match([]byte(name)) {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"Error in field 'instance_name' : Invalid name for collection instances : Should match %s but found '%s'",
+			instanceNameRegRaw, name)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	inst, ok := s.instances[name]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "instance %q not found", name)
+	}
+	return inst, nil
+}
+
+func (s *server) ListInstances(ctx context.Context, req *btapb.ListInstancesRequest) (*btapb.ListInstancesResponse, error) {
+	parent := req.GetParent()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var instances []*btapb.Instance
+	prefix := parent + "/instances/"
+	for name, inst := range s.instances {
+		if strings.HasPrefix(name, prefix) {
+			// Ensure exact segment boundary: "projects/a" must not match "projects/ab".
+			suffix := name[len(prefix):]
+			if !strings.Contains(suffix, "/") {
+				instances = append(instances, inst)
+			}
+		}
+	}
+	return &btapb.ListInstancesResponse{Instances: instances}, nil
+}
+
+func (s *server) UpdateInstance(ctx context.Context, req *btapb.Instance) (*btapb.Instance, error) {
+	name := req.GetName()
+	if !regInstanceName.Match([]byte(name)) {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"Error in field 'instance_name' : Invalid name for collection instances : Should match %s but found '%s'",
+			instanceNameRegRaw, name)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stored, ok := s.instances[name]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "instance %q not found", name)
+	}
+
+	// Update mutable fields.
+	if req.DisplayName != "" {
+		stored.DisplayName = req.DisplayName
+	}
+	if req.Type != btapb.Instance_TYPE_UNSPECIFIED {
+		stored.Type = req.Type
+	}
+	if req.Labels != nil {
+		stored.Labels = req.Labels
+	}
+	if req.State != btapb.Instance_STATE_NOT_KNOWN {
+		if _, ok := btapb.Instance_State_name[int32(req.State)]; !ok {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid state %v", req.State)
+		}
+		stored.State = req.State
+	}
+
+	parent, instanceId := instanceParentAndId(name)
+	if err := s.instanceBackend.Save(parent, instanceId, stored); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to persist instance: %v", err)
+	}
+
+	return stored, nil
+}
+
+// instanceNameFromParent extracts the project ID from a parent string of the form
+// "projects/{project}" or "projects/{project}/instances/{instance}".
+func instanceNameFromParent(parent string) string {
+	if idx := strings.Index(parent, "/instances/"); idx >= 0 {
+		return parent[:idx]
+	}
+	return parent
+}
+
+// instanceParentAndId splits a full instance name "projects/{p}/instances/{i}"
+// into the parent "projects/{p}" and instance ID.
+func instanceParentAndId(name string) (parent, instanceId string) {
+	if idx := strings.LastIndex(name, "/instances/"); idx >= 0 {
+		return name[:idx], name[idx+len("/instances/"):]
+	}
+	return name, name
+}
 
 func (s *server) DeleteInstance(ctx context.Context, req *btapb.DeleteInstanceRequest) (*empty.Empty, error) {
 	name := req.GetName()
@@ -78,70 +215,31 @@ func (s *server) DeleteInstance(ctx context.Context, req *btapb.DeleteInstanceRe
 		return nil, status.Errorf(codes.NotFound, "instance %q not found", name)
 	}
 
-	// Then finally remove the instance.
+	// Delete all tables under this instance.
+	prefix := name + "/tables/"
+	for tblName, tbl := range s.tables {
+		if strings.HasPrefix(tblName, prefix) {
+			s.tableBackend.Delete(tbl)
+			tbl.rows.DeleteAll()
+			delete(s.tables, tblName)
+		}
+	}
+
+	// Clean up materialized views whose source tables belong to this instance.
+	for mvName := range s.materializedViews {
+		if strings.HasPrefix(mvName, name+"/") {
+			s.cmvs.deregister(viewIDFromName(mvName))
+			s.mvBackend.Delete(mvName)
+			delete(s.materializedViews, mvName)
+		}
+	}
+
+	// Remove the instance from memory and persistence.
 	delete(s.instances, name)
+	parent, instanceId := instanceParentAndId(name)
+	s.instanceBackend.Delete(parent, instanceId)
 
 	return new(empty.Empty), nil
-}
-
-func (s *server) CreateCluster(ctx context.Context, req *btapb.CreateClusterRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) GetCluster(ctx context.Context, req *btapb.GetClusterRequest) (*btapb.Cluster, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) ListClusters(ctx context.Context, req *btapb.ListClustersRequest) (*btapb.ListClustersResponse, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) UpdateCluster(ctx context.Context, req *btapb.Cluster) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) PartialUpdateCluster(ctx context.Context, req *btapb.PartialUpdateClusterRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) DeleteCluster(ctx context.Context, req *btapb.DeleteClusterRequest) (*empty.Empty, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) CreateAppProfile(ctx context.Context, req *btapb.CreateAppProfileRequest) (*btapb.AppProfile, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) GetAppProfile(ctx context.Context, req *btapb.GetAppProfileRequest) (*btapb.AppProfile, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) ListAppProfiles(ctx context.Context, req *btapb.ListAppProfilesRequest) (*btapb.ListAppProfilesResponse, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) UpdateAppProfile(ctx context.Context, req *btapb.UpdateAppProfileRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) DeleteAppProfile(ctx context.Context, req *btapb.DeleteAppProfileRequest) (*empty.Empty, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) GetIamPolicy(ctx context.Context, req *iampb.GetIamPolicyRequest) (*iampb.Policy, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) SetIamPolicy(ctx context.Context, req *iampb.SetIamPolicyRequest) (*iampb.Policy, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) TestIamPermissions(ctx context.Context, req *iampb.TestIamPermissionsRequest) (*iampb.TestIamPermissionsResponse, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) ListHotTablets(ctx context.Context, req *btapb.ListHotTabletsRequest) (*btapb.ListHotTabletsResponse, error) {
-	return nil, errUnimplemented
 }
 
 // CreateMaterializedView parses the SQL query in the request, registers a CMV
@@ -278,22 +376,17 @@ func (s *server) DeleteMaterializedView(ctx context.Context, req *btapb.DeleteMa
 	return new(empty.Empty), nil
 }
 
-func (s *server) CreateLogicalView(ctx context.Context, req *btapb.CreateLogicalViewRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
+// IAM methods must be explicitly implemented to resolve ambiguity between
+// UnimplementedBigtableTableAdminServer and UnimplementedBigtableInstanceAdminServer,
+// which both embed these methods.
+func (s *server) GetIamPolicy(ctx context.Context, req *iampb.GetIamPolicyRequest) (*iampb.Policy, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetIamPolicy not implemented")
 }
 
-func (s *server) GetLogicalView(ctx context.Context, req *btapb.GetLogicalViewRequest) (*btapb.LogicalView, error) {
-	return nil, errUnimplemented
+func (s *server) SetIamPolicy(ctx context.Context, req *iampb.SetIamPolicyRequest) (*iampb.Policy, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetIamPolicy not implemented")
 }
 
-func (s *server) ListLogicalViews(ctx context.Context, req *btapb.ListLogicalViewsRequest) (*btapb.ListLogicalViewsResponse, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) UpdateLogicalView(ctx context.Context, req *btapb.UpdateLogicalViewRequest) (*longrunning.Operation, error) {
-	return nil, errUnimplemented
-}
-
-func (s *server) DeleteLogicalView(ctx context.Context, req *btapb.DeleteLogicalViewRequest) (*empty.Empty, error) {
-	return nil, errUnimplemented
+func (s *server) TestIamPermissions(ctx context.Context, req *iampb.TestIamPermissionsRequest) (*iampb.TestIamPermissionsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method TestIamPermissions not implemented")
 }

@@ -16,6 +16,7 @@ The Cloud SDK provided `cbtemulator` is in-memory and does not support persisten
 ## Features
 
 ### Data Plane (gRPC)
+
 - **ReadRows** — full support with row keys, row ranges, reversed scans, row limits
 - **MutateRow / MutateRows** — atomic row mutations (SetCell, DeleteFromColumn, DeleteFromFamily, DeleteFromRow)
 - **CheckAndMutateRow** — conditional mutations with predicate filters
@@ -24,6 +25,7 @@ The Cloud SDK provided `cbtemulator` is in-memory and does not support persisten
 - **PingAndWarm** — returns Unimplemented (safe, no crash)
 
 ### Admin (gRPC)
+
 - **Instance CRUD** — Create, Get, List, Update, Delete instances
 - **Table CRUD** — Create, List, Get, Delete tables
 - **Column Families** — ModifyColumnFamilies (add/drop)
@@ -32,19 +34,23 @@ The Cloud SDK provided `cbtemulator` is in-memory and does not support persisten
 - **Materialized Views (CMV)** — Create, Get, List, Update, Delete with write-time sync and delete propagation
 
 ### Filters
+
 Supported row filters: Chain, Interleave, Condition, Sink, PassAll, BlockAll,
 RowKeyRegex, RowSample, FamilyNameRegex, ColumnQualifierRegex, ColumnRange,
 TimestampRange, ValueRange, ValueRegex, CellsPerColumnLimit, CellsPerRowLimit,
 CellsPerRowOffset, StripValueTransformer, ApplyLabelTransformer.
 
 ### Persistence
+
 All state is persisted to SQLite and survives emulator restarts:
+
 - `instances_t` — instance metadata
 - `tables_t` — table definitions and column families
 - `rows_t` — row keys and cell data (gob-encoded)
 - `materialized_views_t` — CMV registrations
 
 ### Forward Compatibility
+
 New gRPC methods added by Google to the Bigtable proto (ExecuteQuery, OpenTable,
 ReadChangeStream, etc.) safely return `codes.Unimplemented` without crashing.
 
@@ -65,22 +71,23 @@ Usage of ./little_bigtable:
 In the environment for your application, set the `BIGTABLE_EMULATOR_HOST` environment variable to the host and port where `little_bigtable` is running. This environment variable is automatically detected by the Bigtable SDK or the `cbt` CLI. For example:
 
 ```bash
-$ export BIGTABLE_EMULATOR_HOST="127.0.0.1:9000"
-$ ./run_my_app
+export BIGTABLE_EMULATOR_HOST="127.0.0.1:9000"
+./run_my_app
 ```
 
 ### Using with `cbt` CLI
 
 ```bash
-$ cbt -project my-project createinstance my-instance "My Instance" my-cluster
-$ cbt -project my-project -instance my-instance createtable my-table families=cf1
-$ cbt -project my-project -instance my-instance set my-table row1 cf1:col1=value1
-$ cbt -project my-project -instance my-instance read my-table
+cbt -project my-project createinstance my-instance "My Instance" my-cluster
+cbt -project my-project -instance my-instance createtable my-table families=cf1
+cbt -project my-project -instance my-instance set my-table row1 cf1:col1=value1
+cbt -project my-project -instance my-instance read my-table
 ```
 
 ### REST API (localcloud console)
 
 When running under localcloud, row-level operations are available via REST:
+
 ```bash
 # Browse rows
 curl http://localhost:8080/bigtable/admin/v2/projects/my-project/instances/my-instance/tables/my-table/rows?limit=50
@@ -92,6 +99,21 @@ curl -X POST http://localhost:8080/bigtable/admin/v2/projects/my-project/instanc
 
 # Delete a row
 curl -X DELETE http://localhost:8080/bigtable/admin/v2/projects/my-project/instances/my-instance/tables/my-table/rows/row1
+```
+
+## Syncing with Upstream
+
+To fetch updates from the upstream repo (`bitly/little_bigtable`) and merge them into your branch:
+
+```bash
+# 1. Fetch all updates from upstream
+git fetch upstream
+
+# 2. Merge upstream/master into the current branch
+git merge upstream/master --no-edit
+
+# 3. Push the merge commit to origin
+git push origin <your-branch>
 ```
 
 ## Limitations

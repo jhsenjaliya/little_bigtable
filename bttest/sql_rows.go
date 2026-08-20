@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/google/btree"
-	"github.com/mattn/go-sqlite3"
 )
 
 // SqlRows is a backend modeled on the github.com/google/btree interface
@@ -60,7 +59,7 @@ type Item = btree.Item
 func (db *SqlRows) query(iterator ItemIterator, query string, args ...interface{}) {
 	// db.mu.RLock()
 	// defer db.mu.RUnlock()
-	rows, err := db.db.Query(query, args...)
+	rows, err := db.db.Query(bind(query), args...)
 	if err == sql.ErrNoRows {
 		return
 	}
@@ -70,9 +69,11 @@ func (db *SqlRows) query(iterator ItemIterator, query string, args ...interface{
 	defer rows.Close()
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.key, &r); err != nil {
+		var key []byte
+		if err := rows.Scan(&key, &r); err != nil {
 			log.Fatal(err)
 		}
+		r.key = string(key)
 		if !iterator(&r) {
 			break
 		}
@@ -88,18 +89,18 @@ func (db *SqlRows) Ascend(iterator ItemIterator) {
 
 func (db *SqlRows) AscendGreaterOrEqual(pivot Item, iterator ItemIterator) {
 	row := pivot.(*row)
-	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? ORDER BY row_key ASC", db.parent, db.tableId, row.key)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? ORDER BY row_key ASC", db.parent, db.tableId, []byte(row.key))
 }
 
 func (db *SqlRows) AscendLessThan(pivot Item, iterator ItemIterator) {
 	row := pivot.(*row)
-	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key < ? ORDER BY row_key ASC", db.parent, db.tableId, row.key)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key < ? ORDER BY row_key ASC", db.parent, db.tableId, []byte(row.key))
 }
 
 func (db *SqlRows) AscendRange(greaterOrEqual, lessThan Item, iterator ItemIterator) {
 	ge := greaterOrEqual.(*row)
 	lt := lessThan.(*row)
-	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? and row_key < ? ORDER BY row_key ASC", db.parent, db.tableId, ge.key, lt.key)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? and row_key < ? ORDER BY row_key ASC", db.parent, db.tableId, []byte(ge.key), []byte(lt.key))
 }
 
 // Descending order methods for reverse scans
@@ -109,24 +110,24 @@ func (db *SqlRows) Descend(iterator ItemIterator) {
 
 func (db *SqlRows) DescendGreaterOrEqual(pivot Item, iterator ItemIterator) {
 	row := pivot.(*row)
-	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? ORDER BY row_key DESC", db.parent, db.tableId, row.key)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? ORDER BY row_key DESC", db.parent, db.tableId, []byte(row.key))
 }
 
 func (db *SqlRows) DescendLessThan(pivot Item, iterator ItemIterator) {
 	row := pivot.(*row)
-	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key < ? ORDER BY row_key DESC", db.parent, db.tableId, row.key)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key < ? ORDER BY row_key DESC", db.parent, db.tableId, []byte(row.key))
 }
 
 func (db *SqlRows) DescendRange(greaterOrEqual, lessThan Item, iterator ItemIterator) {
 	ge := greaterOrEqual.(*row)
 	lt := lessThan.(*row)
-	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? and row_key < ? ORDER BY row_key DESC", db.parent, db.tableId, ge.key, lt.key)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? and row_key < ? ORDER BY row_key DESC", db.parent, db.tableId, []byte(ge.key), []byte(lt.key))
 }
 
 func (db *SqlRows) DeleteAll() {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	_, err := db.db.Exec("DELETE FROM rows_t WHERE parent = ? and table_id = ?", db.parent, db.tableId)
+	_, err := db.db.Exec(bind("DELETE FROM rows_t WHERE parent = ? and table_id = ?"), db.parent, db.tableId)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func (db *SqlRows) Delete(item Item) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	row := item.(*row)
-	_, err := db.db.Exec("DELETE FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?", db.parent, db.tableId, row.key)
+	_, err := db.db.Exec(bind("DELETE FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?"), db.parent, db.tableId, []byte(row.key))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -150,7 +151,7 @@ func (db *SqlRows) Get(key Item) Item {
 	}
 	// db.mu.RLock()
 	// defer db.mu.RUnlock()
-	err := db.db.QueryRow("SELECT families FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?", db.parent, db.tableId, row.key).Scan(row)
+	err := db.db.QueryRow(bind("SELECT families FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?"), db.parent, db.tableId, []byte(row.key)).Scan(row)
 	if err == sql.ErrNoRows {
 		return row
 	}
@@ -164,7 +165,7 @@ func (db *SqlRows) Len() int {
 	var count int
 	// db.mu.RLock()
 	// defer db.mu.RUnlock()
-	err := db.db.QueryRow("SELECT count(*) FROM rows_t WHERE parent = ? and table_id = ?", db.parent, db.tableId).Scan(&count)
+	err := db.db.QueryRow(bind("SELECT count(*) FROM rows_t WHERE parent = ? and table_id = ?"), db.parent, db.tableId).Scan(&count)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -180,10 +181,10 @@ func (db *SqlRows) ReplaceOrInsert(item Item) Item {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	_, err = db.db.Exec("INSERT INTO rows_t (parent, table_id, row_key, families) values (?, ?, ?, ?)", db.parent, db.tableId, row.key, families)
-	if e, ok := err.(sqlite3.Error); ok && e.Code == 19 {
-		_, err = db.db.Exec("UPDATE rows_t SET families = ? WHERE parent = ? AND table_id = ? AND row_key = ?", families, db.parent, db.tableId, row.key)
-	}
+	_, err = db.db.Exec(
+		bind("INSERT INTO rows_t (parent, table_id, row_key, families) VALUES (?, ?, ?, ?) ON CONFLICT (parent, table_id, row_key) DO UPDATE SET families = ?"),
+		db.parent, db.tableId, []byte(row.key), families, families,
+	)
 	if err != nil {
 		log.Fatalf("row:%s err %s", row.key, err)
 	}

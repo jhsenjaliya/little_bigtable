@@ -27,6 +27,8 @@ func newTestServerWithCMV(t *testing.T, configs []CMVConfig) *server {
 		materializedViews: make(map[string]*btapb.MaterializedView),
 		db:                db,
 		tableBackend:      NewSqlTables(db),
+		adminBackend:      NewSqlAdminMetadata(db),
+		changeLog:         NewSqlChangeLog(db),
 		mvBackend:         NewSqlMaterializedViews(db),
 		cmvs:              newCMVRegistry(),
 	}
@@ -288,6 +290,8 @@ func TestCreateMaterializedViewRPC(t *testing.T) {
 		materializedViews: make(map[string]*btapb.MaterializedView),
 		db:                db,
 		tableBackend:      NewSqlTables(db),
+		adminBackend:      NewSqlAdminMetadata(db),
+		changeLog:         NewSqlChangeLog(db),
 		mvBackend:         NewSqlMaterializedViews(db),
 		cmvs:              newCMVRegistry(),
 	}
@@ -433,6 +437,8 @@ func newTestInstanceServer(t *testing.T) (*server, string) {
 		materializedViews: make(map[string]*btapb.MaterializedView),
 		db:                db,
 		tableBackend:      NewSqlTables(db),
+		adminBackend:      NewSqlAdminMetadata(db),
+		changeLog:         NewSqlChangeLog(db),
 		mvBackend:         NewSqlMaterializedViews(db),
 		cmvs:              newCMVRegistry(),
 	}

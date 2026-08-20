@@ -75,13 +75,15 @@ func newTestServer(t *testing.T) *server {
 	CreateTables(context.Background(), db)
 
 	s := &server{
-		tables:          make(map[string]*table),
-		instances:       make(map[string]*btapb.Instance),
-		db:              db,
-		tableBackend:    NewSqlTables(db),
-		mvBackend:       NewSqlMaterializedViews(db),
-		instanceBackend: NewSqlInstances(db),
-		cmvs:            newCMVRegistry(),
+		tables:       make(map[string]*table),
+		instances:    make(map[string]*btapb.Instance),
+		clusters:     make(map[string]*btapb.Cluster),
+		appProfiles:  make(map[string]*btapb.AppProfile),
+		db:           db,
+		tableBackend: NewSqlTables(db),
+		adminBackend: NewSqlAdminMetadata(db),
+		mvBackend:    NewSqlMaterializedViews(db),
+		cmvs:         newCMVRegistry(),
 	}
 	return s
 }
@@ -1076,8 +1078,13 @@ func TestReadRowsOrder(t *testing.T) {
 	if len(mock.responses) == 0 {
 		t.Fatal("Response count: got 0, want > 0")
 	}
-	if len(mock.responses[0].Chunks) != 16 {
-		t.Fatalf("Chunk count: got %d, want 16", len(mock.responses[0].Chunks))
+	// Interleave returns the union of cells matching either sub-filter.
+	// cf1 family match: 9 cells (3 cols × 3 versions)
+	// col2 qualifier match outside cf1: cf0/col2 (1 cell, GC'd) + cf2/col2 (3 cells) = 4
+	// cf1/col2 cells appear in both sub-filters but are deduplicated.
+	// Total: 9 + 4 = 13
+	if len(mock.responses[0].Chunks) != 13 {
+		t.Fatalf("Chunk count: got %d, want 13", len(mock.responses[0].Chunks))
 	}
 	testOrder(mock)
 
@@ -2369,13 +2376,15 @@ func TestInstancePersistence(t *testing.T) {
 	CreateTables(ctx, db1)
 
 	srv1 := &server{
-		tables:          make(map[string]*table),
-		instances:       make(map[string]*btapb.Instance),
-		db:              db1,
-		tableBackend:    NewSqlTables(db1),
-		mvBackend:       NewSqlMaterializedViews(db1),
-		instanceBackend: NewSqlInstances(db1),
-		cmvs:            newCMVRegistry(),
+		tables:       make(map[string]*table),
+		instances:    make(map[string]*btapb.Instance),
+		clusters:     make(map[string]*btapb.Cluster),
+		appProfiles:  make(map[string]*btapb.AppProfile),
+		db:           db1,
+		tableBackend: NewSqlTables(db1),
+		adminBackend: NewSqlAdminMetadata(db1),
+		mvBackend:    NewSqlMaterializedViews(db1),
+		cmvs:         newCMVRegistry(),
 	}
 
 	_, err = srv1.CreateInstance(ctx, &btapb.CreateInstanceRequest{
@@ -2400,15 +2409,17 @@ func TestInstancePersistence(t *testing.T) {
 	db2.SetMaxOpenConns(1)
 
 	srv2 := &server{
-		tables:          make(map[string]*table),
-		instances:       make(map[string]*btapb.Instance),
-		db:              db2,
-		tableBackend:    NewSqlTables(db2),
-		mvBackend:       NewSqlMaterializedViews(db2),
-		instanceBackend: NewSqlInstances(db2),
-		cmvs:            newCMVRegistry(),
+		tables:       make(map[string]*table),
+		instances:    make(map[string]*btapb.Instance),
+		clusters:     make(map[string]*btapb.Cluster),
+		appProfiles:  make(map[string]*btapb.AppProfile),
+		db:           db2,
+		tableBackend: NewSqlTables(db2),
+		adminBackend: NewSqlAdminMetadata(db2),
+		mvBackend:    NewSqlMaterializedViews(db2),
+		cmvs:         newCMVRegistry(),
 	}
-	srv2.LoadInstances()
+	srv2.LoadAdminMetadata()
 
 	name := "projects/test-proj/instances/persist-instance"
 	inst, ok := srv2.instances[name]

@@ -2,3 +2,8 @@ little_bigtable.db
 little_bigtable
 build
 dist
+.docker/offline-go/*
+!.docker/offline-go/.gitkeep
+.idea
+vendor
+

@@ -6,8 +6,6 @@ import (
 	"encoding/gob"
 	"fmt"
 	"log"
-
-	"github.com/mattn/go-sqlite3"
 )
 
 // SqlTables persists tables to tables_t
@@ -59,7 +57,7 @@ func (db *SqlTables) Get(parent, tableId string) *table {
 		tableId: tableId,
 		rows:    NewSqlRows(db.db, parent, tableId),
 	}
-	err := db.db.QueryRow("SELECT metadata FROM tables_t WHERE parent = ? AND table_id = ?", parent, tableId).Scan(tbl)
+	err := db.db.QueryRow(bind("SELECT metadata FROM tables_t WHERE parent = ? AND table_id = ?"), parent, tableId).Scan(tbl)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -98,10 +96,10 @@ func (db *SqlTables) Save(t *table) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	_, err = db.db.Exec("INSERT INTO tables_t (parent, table_id, metadata) VALUES (?, ?, ?)", t.parent, t.tableId, metadata)
-	if e, ok := err.(sqlite3.Error); ok && e.Code == 19 {
-		_, err = db.db.Exec("UPDATE tables_t SET metadata = ? WHERE parent = ? AND table_id = ?", metadata, t.parent, t.tableId)
-	}
+	_, err = db.db.Exec(
+		bind("INSERT INTO tables_t (parent, table_id, metadata) VALUES (?, ?, ?) ON CONFLICT (parent, table_id) DO UPDATE SET metadata = ?"),
+		t.parent, t.tableId, metadata, metadata,
+	)
 	if err != nil {
 		log.Fatalf("%#v", err)
 	}
@@ -109,7 +107,7 @@ func (db *SqlTables) Save(t *table) {
 
 // Delete removes a table's metadata record from the DB.
 func (db *SqlTables) Delete(t *table) {
-	_, err := db.db.Exec("DELETE FROM tables_t WHERE parent = ? AND table_id = ? ", t.parent, t.tableId)
+	_, err := db.db.Exec(bind("DELETE FROM tables_t WHERE parent = ? AND table_id = ? "), t.parent, t.tableId)
 	if err != nil {
 		log.Fatal(err)
 	}

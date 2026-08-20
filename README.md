@@ -2,16 +2,17 @@
 
 ![CI Status](https://github.com/bitly/little_bigtable/actions/workflows/test.yaml/badge.svg?branch=master)
 
-A local emulator for [Cloud Bigtable](https://cloud.google.com/bigtable) with persistence to a sqlite3 backend.
+A local emulator for [Cloud Bigtable](https://cloud.google.com/bigtable) with persistence to a SQLite or PostgreSQL backend.
 
 The Cloud SDK provided `cbtemulator` is in-memory and does not support persistence which limits it's applicability. This project is a fork of `cbtemulator` from [google-cloud-go/bigtable/bttest](https://github.com/googleapis/google-cloud-go/tree/c46c1c395b5f2fb89776a2d0e478e39a2d5572e4/bigtable/bttest)
 
-| | [`cbtemulator`](https://cloud.google.com/bigtable/docs/emulator) | "little" Bigtable | Bigtable
-| --- | ----- | ---- | ----
-| **Storage** | In-Memory | sqlite3 | Distributed GFS
-| **Type** | Emulator | Emulator | Managed Production Datastore
-| **Scaling**| Single process | Single process | Scalable multi-node backend
-| **GC** | async GC | per-row GC at read time |
+
+|             | [`cbtemulator`](https://cloud.google.com/bigtable/docs/emulator) | "little" Bigtable       | Bigtable                     |
+| ----------- | ---------------------------------------------------------------- | ----------------------- | ---------------------------- |
+| **Storage** | In-Memory                                                        | sqlite3 or postgres     | Distributed GFS              |
+| **Type**    | Emulator                                                         | Emulator                | Managed Production Datastore |
+| **Scaling** | Single process                                                   | Single process          | Scalable multi-node backend  |
+| **GC**      | async GC                                                         | per-row GC at read time |                              |
 
 ## Features
 
@@ -42,12 +43,14 @@ CellsPerRowOffset, StripValueTransformer, ApplyLabelTransformer.
 
 ### Persistence
 
-All state is persisted to SQLite and survives emulator restarts:
+All state is persisted (to SQLite or PostgreSQL, per `-database-driver`) and survives emulator restarts:
 
-- `instances_t` — instance metadata
+- `instances_t` / `clusters_t` / `app_profiles_t` — instance, cluster, and app profile metadata
 - `tables_t` — table definitions and column families
-- `rows_t` — row keys and cell data (gob-encoded)
+- `rows_t` — row keys and cell data
 - `materialized_views_t` — CMV registrations
+- `authorized_views_t` / `logical_views_t` / `backups_t` — authorized views, logical views, and backups
+- `change_log_t` — change stream mutation log
 
 ### Forward Compatibility
 
@@ -58,21 +61,92 @@ ReadChangeStream, etc.) safely return `codes.Unimplemented` without crashing.
 
 ```
 Usage of ./little_bigtable:
+  -database-driver string
+      database/sql driver name: postgres or sqlite3 (default "postgres")
+  -database-url string
+      database/sql connection string
   -db-file string
-      path to data file (default "little_bigtable.db")
+      legacy sqlite3 data file path (default "little_bigtable.db")
   -host string
       the address to bind to on the local machine (default "localhost")
   -port int
       the port number to bind to on the local machine (default 9000)
+  -strict-admin
+      require instances to exist before table/data APIs are used (default true)
   -version
       show version
 ```
+
+With `-database-driver sqlite3`, `-db-file` is used to build the connection string automatically. With `-database-driver postgres` (the default), pass a connection string via `-database-url`.
 
 In the environment for your application, set the `BIGTABLE_EMULATOR_HOST` environment variable to the host and port where `little_bigtable` is running. This environment variable is automatically detected by the Bigtable SDK or the `cbt` CLI. For example:
 
 ```bash
 export BIGTABLE_EMULATOR_HOST="127.0.0.1:9000"
 ./run_my_app
+```
+
+### Running with Docker (Persistent Storage)
+
+`little_bigtable` stores all metadata, tables, column families, and row data in a single SQLite database file. When running in a container, mount a volume for the database path so data persists across container restarts, updates, and recreations.
+
+> **Note:** Always pass `-host 0.0.0.0` inside a container so the gRPC server binds to all interfaces rather than container loopback (`localhost`/`127.0.0.1`).
+
+#### Using `docker run`
+
+Mount a named volume to `/data` and set `-db-file` accordingly:
+
+```bash
+# Create a named volume
+docker volume create little_bigtable_data
+
+# Run the container with persistent storage
+docker run -d \
+  --name little_bigtable \
+  -p 9000:9000 \
+  -v little_bigtable_data:/data \
+  <image-name> \
+  -host 0.0.0.0 \
+  -port 9000 \
+  -db-file /data/little_bigtable.db
+```
+
+Or using a host directory bind mount:
+
+```bash
+mkdir -p ./data
+docker run -d \
+  --name little_bigtable \
+  -p 9000:9000 \
+  -v "$(pwd)/data:/data" \
+  <image-name> \
+  -host 0.0.0.0 \
+  -port 9000 \
+  -db-file /data/little_bigtable.db
+```
+
+#### Using `docker-compose.yml`
+
+```yaml
+services:
+  little_bigtable:
+    image: <image-name>
+    container_name: little_bigtable
+    ports:
+      - "9000:9000"
+    volumes:
+      - little_bigtable_data:/data
+    command:
+      - "-host"
+      - "0.0.0.0"
+      - "-port"
+      - "9000"
+      - "-db-file"
+      - "/data/little_bigtable.db"
+    restart: unless-stopped
+
+volumes:
+  little_bigtable_data:
 ```
 
 ### Using with `cbt` CLI
@@ -118,9 +192,10 @@ git push origin <your-branch>
 
 ## Limitations
 
-- **Non-production features** (snapshots, backups, restores, change streams, GoogleSQL queries, clusters, IAM, app profiles, logical views, authorized views) return `codes.Unimplemented`.
+- **Non-production features** (snapshots, restores, GoogleSQL queries) return `codes.Unimplemented`.
 - **GoogleSQL queries** (ExecuteQuery/PrepareQuery) are not supported.
 - **Session protocol** (OpenTable/OpenAuthorizedView/OpenMaterializedView) is not implemented — not needed for correctness with standard SDK usage.
 - Single-node emulator by design; clusters, multi-region, replication not supported.
 - Some GC rule types (Intersection) are not fully supported.
 - CMV shadow tables do not auto-update when source table column families change after CMV creation.
+- Some filters are not implemented or have partial support. See [cbtemulator docs](https://cloud.google.com/bigtable/docs/emulator#filters)

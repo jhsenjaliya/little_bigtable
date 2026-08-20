@@ -38,11 +38,13 @@ func newInstanceTestServer(t *testing.T) *server {
 	return &server{
 		tables:            make(map[string]*table),
 		instances:         make(map[string]*btapb.Instance),
+		clusters:          make(map[string]*btapb.Cluster),
+		appProfiles:       make(map[string]*btapb.AppProfile),
 		materializedViews: make(map[string]*btapb.MaterializedView),
 		db:                db,
 		tableBackend:      NewSqlTables(db),
+		adminBackend:      NewSqlAdminMetadata(db),
 		mvBackend:         NewSqlMaterializedViews(db),
-		instanceBackend:   NewSqlInstances(db),
 		cmvs:              newCMVRegistry(),
 	}
 }
@@ -64,7 +66,7 @@ func TestDeleteInstance(t *testing.T) {
 		},
 	}
 	srv.instances[name] = inst
-	srv.instanceBackend.Save("projects/test", "a1042-instance", inst)
+	srv.adminBackend.SaveInstance(inst)
 
 	// 1. Deletion of a just created instance should succeed.
 	delReq := &btapb.DeleteInstanceRequest{Name: name}

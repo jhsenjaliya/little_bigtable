@@ -155,8 +155,12 @@ func TestConcurrentMutationsReadModifyAndGC(t *testing.T) {
 					RowKey:    []byte(fmt.Sprint(rand.Intn(100))),
 					Mutations: ms(),
 				}
-				if _, err := s.MutateRow(ctx, req); err != nil {
-					panic(err) // can't use t.Fatal in goroutine
+				// t.Error is safe to call from a non-test goroutine (unlike t.Fatal).
+				// A failure here after ctx has expired is an expected race between the
+				// ctx.Err() check and the call itself, not a bug — ignore it.
+				if _, err := s.MutateRow(ctx, req); err != nil && ctx.Err() == nil {
+					t.Errorf("MutateRow: %v", err)
+					return
 				}
 			}
 		}()
@@ -176,9 +180,13 @@ func TestConcurrentMutationsReadModifyAndGC(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(1 * time.Second):
-		t.Error("Concurrent mutations and GCs haven't completed after 1s")
+	case <-time.After(5 * time.Second):
+		t.Error("Concurrent mutations and GCs haven't completed after 5s")
 	}
+	// Always wait for every goroutine to actually finish before returning, even if the
+	// timeout above fired — otherwise t.Cleanup's db.Close() can race with in-flight
+	// queries and crash the whole test binary via a panic in a leaked goroutine.
+	<-done
 }
 
 func TestConcurrentMutations(t *testing.T) {

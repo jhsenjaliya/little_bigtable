@@ -21,10 +21,17 @@ import (
 	"testing"
 
 	btapb "cloud.google.com/go/bigtable/admin/apiv2/adminpb"
-	_ "github.com/mattn/go-sqlite3"
+	sqlite "github.com/glebarez/go-sqlite"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// glebarez/go-sqlite is a pure-Go (no cgo) SQLite driver; it registers
+// itself as "sqlite" by default, so register it under "sqlite3" as well
+// to stay a drop-in replacement for mattn/go-sqlite3 across the package.
+func init() {
+	sqlite.RegisterAsSQLITE3()
+}
 
 func newInstanceTestServer(t *testing.T) *server {
 	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared", newDBFile(t)))

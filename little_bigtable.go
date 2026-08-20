@@ -12,11 +12,18 @@ import (
 	"os"
 	"runtime"
 
+	sqlite "github.com/glebarez/go-sqlite"
 	"github.com/jhsenjaliya/little_bigtable/bttest"
 	_ "github.com/lib/pq"
-	_ "github.com/mattn/go-sqlite3"
 	"google.golang.org/grpc"
 )
+
+// glebarez/go-sqlite is a pure-Go (no cgo) SQLite driver; it registers
+// itself as "sqlite" by default, so register it under "sqlite3" as well
+// to stay a drop-in replacement for mattn/go-sqlite3.
+func init() {
+	sqlite.RegisterAsSQLITE3()
+}
 
 const (
 	maxMsgSize = 256 * 1024 * 1024 // 256 MiB

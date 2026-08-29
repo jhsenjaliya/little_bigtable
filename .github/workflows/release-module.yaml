@@ -1,7 +1,6 @@
 name: Release Go Module
 
-# Triggered manually or when a version tag is pushed.
-# Creates a GitHub release and verifies the Go module is fetchable.
+# Releases are allowed only for commits on jay-bigtable-extended.
 on:
   push:
     tags:
@@ -12,30 +11,72 @@ on:
         description: 'Version tag to create (e.g. v0.4.0)'
         required: true
         type: string
-      branch:
-        description: 'Branch to tag and release from (default: master)'
-        required: false
-        type: string
-        default: 'master'
 
 permissions:
   contents: write
 
 env:
   GOTOOLCHAIN: auto
+  RELEASE_BRANCH: jay-bigtable-extended
 
 jobs:
+  validate:
+    name: Validate Release Source
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate release
+        id: release
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          git fetch --no-tags origin \
+            "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            TAG="$REQUESTED_VERSION"
+            TARGET=$(git rev-parse "origin/${RELEASE_BRANCH}^{commit}")
+          else
+            TAG="$GITHUB_REF_NAME"
+            TARGET=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          fi
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Version must match vX.Y.Z, got: $TAG"
+            exit 1
+          fi
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]] &&
+             git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "ERROR: Tag $TAG already exists"
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$TARGET" "origin/${RELEASE_BRANCH}"; then
+            echo "ERROR: Commit $TARGET is not on ${RELEASE_BRANCH}"
+            exit 1
+          fi
+
+          echo "Releasing $TAG from $TARGET on ${RELEASE_BRANCH}"
+          echo "commit=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   test:
     name: Test
+    needs: validate
     runs-on: ubuntu-latest
     container: golang:1.26
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.branch || github.ref }}
-
-      - name: Install C compiler (required for go-sqlite3)
-        run: apt-get update && apt-get install -y gcc
+          ref: ${{ needs.validate.outputs.commit }}
 
       - name: Build
         run: go build -buildvcs=false ./...
@@ -46,80 +87,80 @@ jobs:
       - name: Test
         run: go test -buildvcs=false ./bttest/ -count=1 -timeout 120s -v
 
-  tag-and-release:
-    name: Tag & Release
-    needs: test
-    runs-on: ubuntu-latest
+  tag:
+    name: Tag
+    needs: [validate, test]
     if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.validate.outputs.commit }}
           fetch-depth: 0
 
-      - name: Validate version format
-        run: |
-          VERSION="${{ inputs.version }}"
-          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "ERROR: Version must match vX.Y.Z format, got: $VERSION"
-            exit 1
-          fi
-
-      - name: Check tag doesn't exist
-        run: |
-          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "ERROR: Tag ${{ inputs.version }} already exists"
-            exit 1
-          fi
-
-      - name: Create tag on target branch
+      - name: Create tag
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET: ${{ needs.validate.outputs.commit }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          BRANCH="${{ inputs.branch || 'master' }}"
-          echo "Tagging ${{ inputs.version }} on branch $BRANCH"
-          git tag -a "${{ inputs.version }}" "origin/$BRANCH" \
-            -m "Release ${{ inputs.version }} from $BRANCH"
-          git push origin "${{ inputs.version }}"
+          git tag --annotate "$TAG" "$TARGET" \
+            --message "Release $TAG from $RELEASE_BRANCH"
+          git push origin "refs/tags/${TAG}"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+  release:
+    name: Create GitHub Release
+    needs: [validate, test, tag]
+    if: ${{ always() && needs.validate.result == 'success' && needs.test.result == 'success' && (github.event_name == 'push' || needs.tag.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
         with:
-          tag_name: ${{ inputs.version }}
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Verify tag target
+        env:
+          EXPECTED: ${{ needs.validate.outputs.commit }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          ACTUAL=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "ERROR: Tag $TAG points to $ACTUAL, expected $EXPECTED"
+            exit 1
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          target_commitish: ${{ needs.validate.outputs.commit }}
           generate_release_notes: true
 
   verify-module:
     name: Verify Go Module
-    needs: tag-and-release
-    if: always() && (needs.tag-and-release.result == 'success' || github.event_name == 'push')
+    needs: [validate, release]
     runs-on: ubuntu-latest
     container: golang:1.26
     steps:
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Wait for module proxy
         run: sleep 30
 
       - name: Verify module is fetchable
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
           echo "Verifying module at $TAG"
-          GONOSUMCHECK=github.com/jhsenjaliya/* \
-          GONOSUMDB=github.com/jhsenjaliya/* \
-          GOPRIVATE=github.com/jhsenjaliya/* \
+          GONOSUMCHECK='github.com/jhsenjaliya/*' \
+          GONOSUMDB='github.com/jhsenjaliya/*' \
+          GOPRIVATE='github.com/jhsenjaliya/*' \
             go list -m "github.com/jhsenjaliya/little_bigtable@${TAG}"
           echo "Module verified successfully"
 
   build-binaries:
     name: Build Binaries
-    needs: test
-    if: github.event_name == 'push' || needs.tag-and-release.result == 'success'
+    needs: [validate, release]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -128,30 +169,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.branch || github.ref }}
+          ref: ${{ needs.validate.outputs.commit }}
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
 
-      - name: Install cross-compilation tools
-        if: matrix.goos == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y gcc
-
-      - name: Determine tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "name=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: ${{ matrix.goos == 'linux' && matrix.goarch == 'amd64' && '1' || '0' }}
+          CGO_ENABLED: 0
         run: |
           go build -buildvcs=false -trimpath -ldflags="-s -w" \
             -o little_bigtable-${{ matrix.goos }}-${{ matrix.goarch }} .
@@ -159,5 +187,5 @@ jobs:
       - name: Upload binary to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.name }}
+          tag_name: ${{ needs.validate.outputs.tag }}
           files: little_bigtable-${{ matrix.goos }}-${{ matrix.goarch }}

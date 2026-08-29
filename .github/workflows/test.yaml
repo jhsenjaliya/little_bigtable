@@ -1,8 +1,8 @@
 name: tests
 
 on:
-  push:         {branches: [master]}
-  pull_request: {branches: [master]}
+  push:         {branches: [jay-bigtable-extended]}
+  pull_request: {branches: [jay-bigtable-extended]}
 
 env:
   GOTOOLCHAIN: auto

@@ -1,4 +1,4 @@
-ARG GO_BASE_IMAGE=public.ecr.aws/docker/library/golang:1.25-alpine
+ARG GO_BASE_IMAGE=public.ecr.aws/docker/library/golang:1.27.0-alpine
 ARG RUNTIME_BASE_IMAGE=public.ecr.aws/docker/library/alpine:3.22
 ARG GO_OFFLINE=false
 ARG GO_OFFLINE_DEPS_DIR=.docker/offline-go

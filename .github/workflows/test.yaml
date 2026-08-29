@@ -6,6 +6,7 @@ on:
 
 env:
   GOTOOLCHAIN: auto
+  CBT_VERSION: v0.0.0-20260810145131-fe593de7bc1a
 
 jobs:
   test:
@@ -14,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go-version: ['1.26']
+        go-version: ['1.27.0']
         goarch: ['amd64']
 
     steps:
@@ -29,7 +30,63 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go build -buildvcs=false ./...
 
+      - name: Install pinned cbt
+        run: |
+          GOBIN="${RUNNER_TEMP}/bin" go install "cloud.google.com/go/cbt@${CBT_VERSION}"
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/bin/cbt" version
+
       - name: Test
         env:
           GOARCH: ${{ matrix.goarch }}
+          CBT_REQUIRED: 'true'
+          CBT_EXPECTED_VERSION: ${{ env.CBT_VERSION }}
         run: go test -buildvcs=false ./bttest/ -count=1 -timeout 180s -v
+
+  storage-conformance-sqlite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.0'
+
+      - name: SQLite storage contract
+        env:
+          LITTLE_BIGTABLE_CONFORMANCE_BACKEND: sqlite
+        run: go test -buildvcs=false ./bttest/ -count=1 -timeout 180s -run '^TestStorageConformance$' -v
+
+  storage-conformance-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: little_bigtable_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d little_bigtable_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.0'
+
+      - name: PostgreSQL storage contract
+        env:
+          LITTLE_BIGTABLE_CONFORMANCE_BACKEND: postgres
+          LITTLE_BIGTABLE_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/little_bigtable_test?sslmode=disable
+        run: go test -buildvcs=false ./bttest/ -count=1 -timeout 180s -run '^TestStorageConformance$' -v

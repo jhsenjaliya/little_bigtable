@@ -7,9 +7,7 @@ All releases are from the `jay-bigtable-extended` branch. Versioning: `v0.0.x`.
 
 ## Releasing a New Version
 
-Releases are done manually from a local machine with Go 1.25+ installed.
-GitHub Actions CI cannot build this project because `cloud.google.com/go/bigtable@v1.46.0`
-requires Go 1.25+ which is not yet available as a stable release on GitHub runners.
+Releases use Go 1.27.0 locally and in GitHub Actions.
 
 ### Steps
 
@@ -47,13 +45,13 @@ GOPRIVATE=github.com/jhsenjaliya/* \
 - Always release from `jay-bigtable-extended` branch, never from `master`
 - `master` tracks upstream `bitly/little_bigtable` and should not be tagged
 - Tags on any branch work for `go get` — Go modules resolve tags to commits regardless of branch
-- Requires Go 1.25+ locally (not available on GitHub Actions yet)
+- Requires Go 1.27.0 locally; GitHub Actions use the same version
 
 ## Building from Source
 
 ### Prerequisites
 
-- Go 1.25+ (pre-release/tip build)
+- Go 1.27.0
 - C compiler (`gcc` or `clang`) for SQLite via `go-sqlite3`
 
 ### Build

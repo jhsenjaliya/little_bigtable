@@ -1,11 +1,13 @@
 # Little Bigtable
 
-![CI Status](https://github.com/bitly/little_bigtable/actions/workflows/test.yaml/badge.svg?branch=master)
+![CI Status](https://github.com/jhsenjaliya/little_bigtable/actions/workflows/test.yaml/badge.svg?branch=jay-bigtable-extended)
 
 A local emulator for [Cloud Bigtable](https://cloud.google.com/bigtable) with persistence to a SQLite or PostgreSQL backend.
 
 The Cloud SDK provided `cbtemulator` is in-memory and does not support persistence which limits it's applicability. This project is a fork of `cbtemulator` from [google-cloud-go/bigtable/bttest](https://github.com/googleapis/google-cloud-go/tree/c46c1c395b5f2fb89776a2d0e478e39a2d5572e4/bigtable/bttest)
 
+For the audited feature and conformance contract, see
+[`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md).
 
 |             | [`cbtemulator`](https://cloud.google.com/bigtable/docs/emulator) | "little" Bigtable       | Bigtable                     |
 | ----------- | ---------------------------------------------------------------- | ----------------------- | ---------------------------- |
@@ -18,12 +20,12 @@ The Cloud SDK provided `cbtemulator` is in-memory and does not support persisten
 
 ### Data Plane (gRPC)
 
-- **ReadRows** — full support with row keys, row ranges, reversed scans, row limits
-- **MutateRow / MutateRows** — atomic row mutations (SetCell, DeleteFromColumn, DeleteFromFamily, DeleteFromRow)
-- **CheckAndMutateRow** — conditional mutations with predicate filters
-- **ReadModifyWriteRow** — atomic append and increment operations
-- **SampleRowKeys** — row key sampling for map-reduce partitioning
-- **PingAndWarm** — returns Unimplemented (safe, no crash)
+- **ReadRows** — table-targeted row keys/ranges, filters, reversed scans, and row limits; production chunking, statistics, and view targets remain partial
+- **MutateRow / MutateRows** — table-targeted SetCell and delete success paths; rollback-safe mixed-failure behavior is not yet conformant
+- **CheckAndMutateRow** — predicate-selected table mutations on success paths; failed-request rollback is not yet conformant
+- **ReadModifyWriteRow** — append and increment success paths; failed-request rollback is not yet conformant
+- **SampleRowKeys** — deterministic table sampling; range-restricted and view-target sampling are not yet conformant
+- **PingAndWarm** — successful liveness no-op
 
 ### Admin (gRPC)
 
@@ -36,14 +38,18 @@ The Cloud SDK provided `cbtemulator` is in-memory and does not support persisten
 
 ### Filters
 
-Supported row filters: Chain, Interleave, Condition, Sink, PassAll, BlockAll,
+Supported row filters: Chain, Interleave, Condition, PassAll, BlockAll,
 RowKeyRegex, RowSample, FamilyNameRegex, ColumnQualifierRegex, ColumnRange,
 TimestampRange, ValueRange, ValueRegex, CellsPerColumnLimit, CellsPerRowLimit,
 CellsPerRowOffset, StripValueTransformer, ApplyLabelTransformer.
 
+Sink is recognized but currently behaves as a partial no-op rather than
+production-equivalent sink suppression.
+
 ### Persistence
 
-All state is persisted (to SQLite or PostgreSQL, per `-database-driver`) and survives emulator restarts:
+The following SQL-backed resource state is persisted (to SQLite or PostgreSQL,
+per `-database-driver`) and survives emulator restarts:
 
 - `instances_t` / `clusters_t` / `app_profiles_t` — instance, cluster, and app profile metadata
 - `tables_t` — table definitions and column families
@@ -52,10 +58,17 @@ All state is persisted (to SQLite or PostgreSQL, per `-database-driver`) and sur
 - `authorized_views_t` / `logical_views_t` / `backups_t` — authorized views, logical views, and backups
 - `change_log_t` — change stream mutation log
 
+IAM policies remain in memory only. Some resource update paths also have
+documented persistence limits; see
+[`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md) for exact contracts.
+
 ### Forward Compatibility
 
-New gRPC methods added by Google to the Bigtable proto (ExecuteQuery, OpenTable,
-ReadChangeStream, etc.) safely return `codes.Unimplemented` without crashing.
+Most methods without local support, such as ExecuteQuery, OpenTable, and
+snapshot RPCs, return `codes.Unimplemented`. Known false-success gaps in
+data-bearing backup and change-stream handlers remain explicitly recorded in
+`bttest.CompatibilityLedger()` until their owning conformance phases replace
+that behavior. `PingAndWarm` is a deterministic local no-op.
 
 ## Usage
 
@@ -88,7 +101,11 @@ export BIGTABLE_EMULATOR_HOST="127.0.0.1:9000"
 
 ### Running with Docker (Persistent Storage)
 
-`little_bigtable` stores all metadata, tables, column families, and row data in a single SQLite database file. When running in a container, mount a volume for the database path so data persists across container restarts, updates, and recreations.
+`little_bigtable` stores its SQL-backed resource metadata, tables, column
+families, and row data in a single SQLite database file. In-memory state such as
+IAM policies is not included. When running in a container, mount a volume for
+the database path so persisted state survives container restarts, updates, and
+recreations.
 
 > **Note:** Always pass `-host 0.0.0.0` inside a container so the gRPC server binds to all interfaces rather than container loopback (`localhost`/`127.0.0.1`).
 
@@ -108,6 +125,7 @@ docker run -d \
   <image-name> \
   -host 0.0.0.0 \
   -port 9000 \
+  -database-driver sqlite3 \
   -db-file /data/little_bigtable.db
 ```
 
@@ -122,6 +140,7 @@ docker run -d \
   <image-name> \
   -host 0.0.0.0 \
   -port 9000 \
+  -database-driver sqlite3 \
   -db-file /data/little_bigtable.db
 ```
 
@@ -141,6 +160,8 @@ services:
       - "0.0.0.0"
       - "-port"
       - "9000"
+      - "-database-driver"
+      - "sqlite3"
       - "-db-file"
       - "/data/little_bigtable.db"
     restart: unless-stopped
@@ -152,11 +173,20 @@ volumes:
 ### Using with `cbt` CLI
 
 ```bash
-cbt -project my-project createinstance my-instance "My Instance" my-cluster
-cbt -project my-project -instance my-instance createtable my-table families=cf1
-cbt -project my-project -instance my-instance set my-table row1 cf1:col1=value1
-cbt -project my-project -instance my-instance read my-table
+export BIGTABLE_EMULATOR_HOST=localhost:9000
+cbt -access-token emulator -project my-project createinstance my-instance "My Instance" my-cluster us-central1-b 1 SSD
+cbt -access-token emulator -project my-project -instance my-instance createtable my-table
+cbt -access-token emulator -project my-project -instance my-instance createfamily my-table cf1
+cbt -access-token emulator -project my-project -instance my-instance set my-table row1 cf1:col1=value1
+cbt -access-token emulator -project my-project -instance my-instance read my-table start=row1 end=row2
+cbt -access-token emulator -project my-project -instance my-instance deletetable my-table
+cbt -access-token emulator -project my-project deleteinstance my-instance
 ```
+
+The standalone `cbt` binary currently initializes an authentication source
+before its Bigtable client observes emulator mode. The non-secret placeholder
+token above prevents a dependency on local gcloud credentials; transport still
+uses only `BIGTABLE_EMULATOR_HOST`.
 
 ### REST API (localcloud console)
 
@@ -212,10 +242,10 @@ git push origin <your-branch>
 
 ## Limitations
 
-- **Non-production features** (snapshots, restores, GoogleSQL queries) return `codes.Unimplemented`.
+- **Non-production features** (snapshots and GoogleSQL queries) return `codes.Unimplemented`.
 - **GoogleSQL queries** (ExecuteQuery/PrepareQuery) are not supported.
 - **Session protocol** (OpenTable/OpenAuthorizedView/OpenMaterializedView) is not implemented — not needed for correctness with standard SDK usage.
-- Single-node emulator by design; clusters, multi-region, replication not supported.
+- Cluster resources support metadata CRUD, but real clustering, multi-node capacity, multi-region operation, and replication are not supported.
 - Some GC rule types (Intersection) are not fully supported.
 - CMV shadow tables do not auto-update when source table column families change after CMV creation.
 - Some filters are not implemented or have partial support. See [cbtemulator docs](https://cloud.google.com/bigtable/docs/emulator#filters)

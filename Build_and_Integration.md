@@ -7,7 +7,7 @@ it into Go projects as a library, release new versions, and build Docker images.
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.27.0
 - C compiler (`gcc` or `clang`) — required for SQLite via `go-sqlite3`
 - macOS: `xcode-select --install`
 - Ubuntu/Debian: `apt-get install gcc`
@@ -41,6 +41,32 @@ Requires static libc (Alpine: `musl-dev`, Debian: install `musl-tools`).
 
 ```bash
 go test ./bttest/ -count=1 -timeout 60s
+```
+
+The backend-neutral persistence contract runs on SQLite by default:
+
+```bash
+LITTLE_BIGTABLE_CONFORMANCE_BACKEND=sqlite \
+  go test ./bttest/ -count=1 -run '^TestStorageConformance$' -v
+```
+
+Run the identical contract against a PostgreSQL test database with:
+
+```bash
+LITTLE_BIGTABLE_CONFORMANCE_BACKEND=postgres \
+LITTLE_BIGTABLE_POSTGRES_DSN='postgres://postgres:postgres@localhost:5432/little_bigtable_test?sslmode=disable' \
+  go test ./bttest/ -count=1 -run '^TestStorageConformance$' -v
+```
+
+CI pins the standalone `cbt` CLI and requires its subprocess smoke test. To
+reproduce that lane locally:
+
+```bash
+go install cloud.google.com/go/cbt@v0.0.0-20260810145131-fe593de7bc1a
+CBT_BIN="$(go env GOPATH)/bin/cbt" \
+CBT_REQUIRED=true \
+CBT_EXPECTED_VERSION=v0.0.0-20260810145131-fe593de7bc1a \
+  go test ./bttest/ -count=1 -run '^TestCBTClientConformance$' -v
 ```
 
 ### Verify build
@@ -200,6 +226,7 @@ db, err := sql.Open("postgres", "postgres://user@localhost/bigtable?sslmode=disa
 | `bttest.ConfigureStorage(driver, strictAdmin)` | Set SQL dialect and admin mode. Call before `NewServer`. |
 | `bttest.CreateTables(ctx, db)` | Initialize schema. Safe to call on existing DB. |
 | `bttest.NewServer(addr, db, ...grpc.ServerOption)` | Start gRPC server. Returns `*Server` with `.Addr` and `.Close()`. |
+| `bttest.CompatibilityLedger()` | Return checked-in intended RPC/field dispositions with observed verification; runtime registration and high-risk message fields are tested for drift. |
 
 ## Releasing a New Version
 
@@ -265,7 +292,7 @@ Override base images:
 
 ```bash
 docker build \
-  --build-arg GO_BASE_IMAGE=golang:1.25-alpine \
+  --build-arg GO_BASE_IMAGE=golang:1.27.0-alpine \
   --build-arg RUNTIME_BASE_IMAGE=alpine:3.22 \
   -t bigtable-emulator-extended:latest .
 ```

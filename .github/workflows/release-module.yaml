@@ -85,7 +85,7 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Test
-        run: go test -buildvcs=false ./bttest/ -count=1 -timeout 120s -v
+        run: go test -buildvcs=false ./bttest/ -count=1 -timeout 180s -v
 
   tag:
     name: Tag

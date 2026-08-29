@@ -1,33 +1,47 @@
-#!/bin/bash
+#!/bin/sh
+set -eu
 
-# 1. commit to bump the version (little_bigtable.go)
-# 2. tag that commit
-# 3. use dist.sh to produce tar.gz for all platforms
-# 4. update the release metadata on github / upload the binaries
+# Let the selected go binary locate its matching standard library.
+unset GOROOT
 
-set -e
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+cd "$ROOT"
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-version=$(awk '/version / {print $NF}' < $DIR/little_bigtable.go | sed 's/"//g')
-goversion=$(go version | awk '{print $3}')
+version=$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' little_bigtable.go)
+if [ -z "$version" ]; then
+    echo "ERROR: Could not read the version from little_bigtable.go" >&2
+    exit 1
+fi
 
 echo "... running tests"
-./test.sh
+"$ROOT/test.sh"
 
-mkdir -p dist
-for target in "linux/amd64"; do
-    os=${target%/*}
-    arch=${target##*/}
-    echo "... building v$version for $os/$arch"
-    BUILD=$(mktemp -d ${TMPDIR:-/tmp}/build-XXXXX)
-    TARGET="little_bigtable-$version.$os-$arch.$goversion"
-    GOOS=$os GOARCH=$arch \
-        go build --tags "$os" -o $BUILD/$TARGET .
-    pushd $BUILD
-    sudo chown -R 0:0 $TARGET
-    tar czvf $TARGET.tar.gz $TARGET
-    mv $TARGET.tar.gz $DIR/dist
-    popd
-    sudo rm -r $BUILD
+dist_dir="$ROOT/dist"
+build_dir=$(mktemp -d "$ROOT/.dist.XXXXXX")
+cleanup() {
+    if [ -n "$build_dir" ]; then
+        rm -rf "$build_dir"
+    fi
+}
+trap cleanup 0
+trap 'exit 1' 1 2 15
+
+for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+    goos=${target%/*}
+    goarch=${target##*/}
+    binary="little_bigtable-${goos}-${goarch}"
+    archive="little_bigtable-${version}-${goos}-${goarch}.tar.gz"
+
+    echo "... building $binary"
+    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+        go build -buildvcs=false -trimpath -ldflags="-s -w" \
+        -o "$build_dir/$binary" .
+    COPYFILE_DISABLE=1 tar -C "$build_dir" -czf "$build_dir/$archive" "$binary"
+    rm "$build_dir/$binary"
 done
+
+rm -rf "$dist_dir"
+mv "$build_dir" "$dist_dir"
+build_dir=
+
+echo "... archives written to $dist_dir"

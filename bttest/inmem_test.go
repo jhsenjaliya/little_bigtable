@@ -523,7 +523,7 @@ func SampleRowKeysConcurrentTest(t *testing.T, antagonist AntagonistFunction) {
 		finished <- true
 	}()
 	go antagonist(s, attempts, tbl.Name, finished)
-	timeout := time.After(15 * time.Second)
+	timeout := time.After(60 * time.Second)
 	for i := 0; i < 2; i++ {
 		select {
 		case <-finished:

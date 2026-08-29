@@ -175,6 +175,26 @@ curl -X POST http://localhost:8080/bigtable/admin/v2/projects/my-project/instanc
 curl -X DELETE http://localhost:8080/bigtable/admin/v2/projects/my-project/instances/my-instance/tables/my-table/rows/row1
 ```
 
+## Releasing
+
+Official releases must come from `jay-bigtable-extended` and are created by the
+**Release Go Module** GitHub Actions workflow.
+
+1. Update the `version` constant in `little_bigtable.go` to the release version
+   without the `v` prefix.
+2. Commit and push that change to `jay-bigtable-extended`, then wait for the
+   branch tests to pass.
+3. In GitHub, open **Actions → Release Go Module → Run workflow**.
+4. Select `jay-bigtable-extended` and enter a tag matching `vX.Y.Z`.
+
+The workflow tests the exact branch tip, creates the annotated tag and GitHub
+release, and uploads Linux and macOS binaries for AMD64 and ARM64. Do not create
+releases from `master`.
+
+For local packaging only, `./dist.sh` runs the complete test suite and writes
+matching `.tar.gz` archives to `dist/`. It does not create tags or publish a
+GitHub release.
+
 ## Syncing with Upstream
 
 To fetch updates from the upstream repo (`bitly/little_bigtable`) and merge them into your branch:

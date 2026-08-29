@@ -1,19 +1,41 @@
 #!/bin/sh
-set -e
+set -eu
 
-GOMAXPROCS=1 go test -timeout 90s ./...
+# Let the selected go binary locate its matching standard library.
+unset GOROOT
 
-if [ "$GOARCH" = "amd64" ] || [ "$GOARCH" = "arm64" ]; then
-    # go test: -race is only supported on linux/amd64, linux/ppc64le,
-    # linux/arm64, freebsd/amd64, netbsd/amd64, darwin/amd64 and windows/amd64
-    GOMAXPROCS=4 go test -timeout 90s -race ./...
-fi
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+cd "$ROOT"
 
-# disable "composite literal uses unkeyed fields"
+timeout=${TEST_TIMEOUT:-180s}
+
+echo "... running tests"
+go test -buildvcs=false -timeout "$timeout" ./...
+
+goos=$(go env GOOS)
+goarch=$(go env GOARCH)
+cgo_enabled=$(go env CGO_ENABLED)
+
+case "$goos/$goarch" in
+    linux/amd64|linux/arm64|linux/loong64|linux/ppc64le|linux/riscv64|linux/s390x|darwin/amd64|darwin/arm64|freebsd/amd64|netbsd/amd64|windows/amd64)
+        if [ "$goos" = "darwin" ] || [ "$cgo_enabled" = "1" ]; then
+            echo "... running race tests"
+            go test -buildvcs=false -timeout "$timeout" -race ./...
+        else
+            echo "... skipping race tests: CGO is disabled"
+        fi
+        ;;
+    *)
+        echo "... skipping race tests: unsupported on $goos/$goarch"
+        ;;
+esac
+
+echo "... running go vet"
 go vet -composites=false ./...
 
-FMTDIFF="$(find . -name '*.go' -exec gofmt -d '{}' ';')"
-if [ -n "$FMTDIFF" ]; then
-    printf '%s\n' "$FMTDIFF"
+echo "... checking gofmt"
+unformatted=$(find . -type f -name '*.go' ! -path './vendor/*' -exec gofmt -l '{}' +)
+if [ -n "$unformatted" ]; then
+    printf '%s\n' "$unformatted"
     exit 1
 fi

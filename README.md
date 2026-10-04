@@ -20,8 +20,7 @@ For the audited feature and conformance contract, see
 
 Status follows the 2026-10-04 parity audit in
 [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md), which is the current
-contract. Behavior is implemented in source; test evidence for this release is
-pending.
+contract; it names the owning test for each capability.
 
 ### Data plane (gRPC)
 
@@ -43,7 +42,7 @@ pending.
 - **Session protocol** — `GetClientConfiguration`, `OpenTable`,
   `OpenAuthorizedView`, `OpenMaterializedView`.
 - **GoogleSQL** — `PrepareQuery` / `ExecuteQuery` over tables, logical views and
-  materialized views. Requires the `gsqlready` build (see Limitations).
+  materialized views (engine in `bttest/internal/gsql`).
 - **PingAndWarm** — validates the instance and app profile.
 
 ### Admin (gRPC)
@@ -58,7 +57,7 @@ pending.
   rules, filtered listing.
 - **Schema bundles** — CRUD with descriptor validation.
 - **Logical views** and **continuous materialized views** — GoogleSQL
-  definitions (see [`CMV_SUPPORT.md`](CMV_SUPPORT.md)); require the `gsqlready` build.
+  definitions (see [`CMV_SUPPORT.md`](CMV_SUPPORT.md)).
 - **Instances, clusters, app profiles** — validated metadata CRUD, pagination,
   guarded deletion.
 - **Long-running operations** — durable Get/List/Wait/Delete/Cancel.
@@ -257,10 +256,6 @@ git push origin <your-branch>
 
 See [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md) for the full list.
 
-- **GoogleSQL is build-gated.** `PrepareQuery`, `ExecuteQuery`, materialized
-  views, logical-view query validation and HLL++ aggregates need the GoogleSQL
-  engine (`bttest/internal/gsql`, build tag `gsqlready`). The default build
-  returns `Unimplemented` for these.
 - **Production-only behavior is not emulated:** replication, failover and
   multi-cluster consistency (consistency checks always succeed), autoscaling
   and node capacity, hot tablets (`ListHotTablets` returns `Unimplemented`),
@@ -269,7 +264,11 @@ See [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md) for the full list.
   production latency, and Dataflow/BigQuery/Pub/Sub connectors.
 - **IAM is not enforced.** The emulator is unauthenticated;
   `TestIamPermissions` grants every requested permission.
-- Change streams use a single partition; partition split/merge is not produced.
+- Change streams use a single partition (no split/merge); the low watermark can
+  precede an in-flight commit; `start_time` is not checked against the time the
+  stream was enabled.
+- An empty instance `display_name` is accepted (defaults to the instance ID);
+  `DeleteCluster` is not blocked by automated-backup locations.
 - `ReadRows` does not emit `last_scanned_row_key`.
 - HLL++ sketch bytes are emulator-specific, not ZetaSketch/BigQuery compatible.
 - Multi-column materialized-view row keys use an emulator-specific encoding.

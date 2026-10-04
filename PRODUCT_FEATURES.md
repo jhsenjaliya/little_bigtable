@@ -3,8 +3,9 @@
 > **Current contract:** [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md)
 > (2026-10-04 parity audit) supersedes the status statements below where they
 > differ. This document describes the branch delta as of 2026-08-29; statements
-> made wrong by the v0.5.0 (unreleased) parity iteration are corrected inline
-> and marked "v0.5.0". Test evidence for v0.5.0 is pending.
+> made wrong by the v0.5.0 parity iteration are corrected inline
+> and marked "v0.5.0" (tag `v0.5.0`, commit `dd5f9e7`). The audit names the
+> owning test for each v0.5.0 capability.
 
 ## Purpose and comparison scope
 
@@ -90,10 +91,10 @@ capacity management, replication, or query engines.
 | Table safety | Table deletion protection | Functional | Test protected-resource workflows. v0.5.0: persisted across restart; soft delete with `UndeleteTable`. |
 | IAM | Get, set, and test-permissions methods | Compatibility stub | Prevent local setup from failing on IAM calls. v0.5.0: policies persisted with etags; still not enforced. |
 | Authorized views | Persistent CRUD and deletion protection | Functional (v0.5.0) | v0.5.0: row/family/qualifier subsets enforced on reads and writes. |
-| Logical views | Persistent CRUD, query storage, deletion protection | Partial emulation (v0.5.0) | v0.5.0: query validated and executable through `ExecuteQuery` in the `gsqlready` build. |
+| Logical views | Persistent CRUD, query storage, deletion protection | Functional (v0.5.0) | v0.5.0: query validated by the GoogleSQL engine and executable through `ExecuteQuery`. |
 | Backups | CRUD, copy, and restore-table operations | Functional (v0.5.0) | v0.5.0: backups snapshot schema and rows; restore is independent of the live table. |
 | Change streams | Persistent mutation log and streaming RPCs | Partial emulation | Test consumers, continuation tokens, and heartbeats. v0.5.0: opt-in per table, retention, grouped records; single partition. |
-| Aggregate mutations | `AddToCell` and `MergeToCell` | Partial emulation | v0.5.0: typed Sum/Min/Max Int64 families; HLL++ in the `gsqlready` build. |
+| Aggregate mutations | `AddToCell` and `MergeToCell` | Partial emulation | v0.5.0: typed Sum/Min/Max Int64 and HLL++ families. |
 | Filters | Explicit unsupported errors | Fix | Avoid silent false-positive test results. v0.5.0: `Interleave` keeps duplicates as in production; `Sink` and `ValueBitmask` implemented. |
 | GC | Intersection-rule implementation | Functional (v0.5.0) | v0.5.0: intersection deletes only when every child rule deletes. |
 | Protocol evolution | Unimplemented-server embedding | Fix | New proto RPCs fail safely with `Unimplemented` instead of panicking. |
@@ -392,9 +393,8 @@ the production API shape.
 
 ### Fidelity limit
 
-v0.5.0: in the `gsqlready` build the query is validated by the GoogleSQL
-engine and the view can be queried with `ExecuteQuery`. In the default build
-the query is stored without validation. Parameterized views are not supported.
+v0.5.0: the query is validated by the GoogleSQL engine and the view can be
+queried with `ExecuteQuery`. Parameterized views are not supported.
 
 ## 10. Backups, backup copies, and table restore
 
@@ -500,8 +500,7 @@ behavior without receiving an unsupported-mutation response.
 ### Fidelity limits
 
 v0.5.0: the family's aggregate `value_type` is persisted and enforced
-(Sum/Min/Max over Int64; HLL++ in the `gsqlready` build, with emulator-specific
-sketch bytes). `AddToCell`/`MergeToCell` on a non-aggregate family return
+(Sum/Min/Max over Int64; HLL++ with emulator-specific sketch bytes). `AddToCell`/`MergeToCell` on a non-aggregate family return
 `InvalidArgument`.
 
 ## 13. Read-filter correctness improvements
@@ -565,8 +564,8 @@ The emulator is safer to use with newer client libraries, even before every new
 Bigtable API has a local implementation.
 
 This does not mean every generated RPC is supported. v0.5.0 examples still
-explicitly unimplemented: snapshot APIs, hot-tablet listing and memory layers;
-GoogleSQL returns `Unimplemented` only in builds without `gsqlready`.
+explicitly unimplemented: snapshot APIs, hot-tablet listing and memory layers.
+GoogleSQL is implemented.
 
 ### `PingAndWarm` compatibility
 
@@ -588,11 +587,11 @@ and the ability to run the emulator in process are inherited from `master`, not
 new branch features.
 
 The standalone binary also changes its observable version identity. Its default
-build version is `0.3.0-localcloud`, and `-version` reports the selected version
+build version is `0.5.0-localcloud` (v0.5.0), and `-version` reports the selected version
 plus the Go runtime used to build it:
 
 ```text
-bigtable-emulator-extended v0.3.0-localcloud (built w/<Go runtime version>)
+bigtable-emulator-extended v0.5.0-localcloud (built w/<Go runtime version>)
 ```
 
 Release packaging currently uses the version compiled from
@@ -861,16 +860,16 @@ adding features:
 | Backend-neutral restart persistence | `bttest/storage_conformance_test.go` | `TestStorageConformance` on SQLite and PostgreSQL 17; separate CI jobs |
 | Instance, cluster, app-profile admin | `bttest/localcloud_instance_admin.go` (v0.5.0; `instance_server.go` removed) | `bttest/instance_server_test.go`, `bttest/google_docs_hello_test.go` |
 | Admin persistence | `bttest/sql_admin_metadata.go`, `bttest/inmem.go` | `TestInstancePersistence` in `bttest/inmem_test.go` |
-| Table deletion protection | `bttest/table_admin.go` (v0.5.0) | v0.5.0 evidence pending |
-| IAM stubs | `bttest/sql_iam.go`, `bttest/localcloud_instance_admin.go` (v0.5.0) | v0.5.0 evidence pending |
+| Table deletion protection | `bttest/table_admin.go` (v0.5.0) | `TestConformanceTableAdminDeletionProtectionBlocksDelete`, `TestConformanceTableAdminUpdateTablePersistsAcrossRestart` |
+| IAM stubs | `bttest/sql_iam.go`, `bttest/localcloud_instance_admin.go` (v0.5.0) | `iam_conformance_test.go` (e.g. `TestConformanceIAMPersistsAcrossRestart`) |
 | Authorized views | `bttest/localcloud_authorized_views.go` | Authorized-view tests in `bttest/localcloud_new_features_test.go` |
 | Logical views | `bttest/localcloud_logical_views.go` | Logical-view tests in `bttest/localcloud_new_features_test.go` |
 | Backups and restore | `bttest/localcloud_backups.go` | Backup/copy/restore tests in `bttest/localcloud_new_features_test.go` |
-| Change streams | `bttest/localcloud_change_stream.go`, `bttest/data_write.go` (v0.5.0) | v0.5.0 evidence pending |
+| Change streams | `bttest/localcloud_change_stream.go`, `bttest/data_write.go` (v0.5.0) | `change_stream_conformance_test.go` |
 | Aggregate mutations | `bttest/mutation_engine.go` (v0.5.0) | Add/Merge tests in `bttest/localcloud_new_features_test.go` |
-| Filter and GC behavior | `bttest/filter.go`; `applyGC` in `bttest/inmem.go` (v0.5.0) | v0.5.0 evidence pending; earlier Interleave/GC tests asserted the old behavior |
+| Filter and GC behavior | `bttest/filter.go`; `applyGC` in `bttest/inmem.go` (v0.5.0) | `filter_conformance_test.go` (e.g. `TestConformanceFilterInterleaveDuplicatesAndLimits`, `TestConformanceGCRuleTruthTables`) |
 | Liveness and protocol fallback | `bttest/localcloud_change_stream.go`, server embeddings in `bttest/inmem.go` | Implementation inspection |
-| v0.5.0 parity iteration (all areas) | See `BIGTABLE_COMPATIBILITY.md` | Evidence pending |
+| v0.5.0 parity iteration (all areas) | See `BIGTABLE_COMPATIBILITY.md` | Owning tests per capability in the audit and `bttest/compatibility.go` |
 | Executable compatibility ledger | `bttest/compatibility.go` | `bttest/compatibility_test.go`; live RPC and protobuf descriptor drift checks |
 | Pinned `cbt` client workflow | `bttest/client_conformance_test.go` | `TestCBTClientConformance`; pinned binary build metadata and subprocess assertions |
 | Fork module and CLI identity | `go.mod`, `little_bigtable.go` | Release workflow build configuration |

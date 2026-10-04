@@ -31,19 +31,17 @@ go build -o little_bigtable .
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o little_bigtable .
 ```
 
-This is how the release workflow and `dist.sh` build the Linux and macOS
-AMD64/ARM64 binaries. The repository `Dockerfile` (and the LocalCloud image
-build) still use `CGO_ENABLED=1` with external static linking and install
-`gcc musl-dev`; that works but is not required by any dependency.
+This is how the release workflow, `dist.sh` and the repository `Dockerfile`
+build. The `Dockerfile` cross-compiles from `--platform=$BUILDPLATFORM` with
+`CGO_ENABLED=0`. For a multi-platform image:
 
-### GoogleSQL build tag
+```bash
+make -f Makefile.localcloud docker-buildx            # OCI archive in dist/
+make -f Makefile.localcloud docker-buildx PUSH=true  # push to the registry
+```
 
-`PrepareQuery`, `ExecuteQuery`, materialized views, logical-view query
-validation and HLL++ aggregates are compiled only with `-tags gsqlready` and
-need the engine package `bttest/internal/gsql`. Without the tag,
-`bttest/gsql_stub.go` makes those RPCs return `Unimplemented`. No build entry
-point sets the tag yet; see finding F-1 in
-[`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md).
+The GoogleSQL engine (`bttest/internal/gsql`) is always built; no build tag is
+needed.
 
 ### Run tests
 
@@ -224,7 +222,7 @@ db, err := sql.Open("postgres", "postgres://user@localhost/bigtable?sslmode=disa
 | `bttest.ConfigureStorage(driver, strictAdmin)` | Set SQL dialect and admin mode. Call before `NewServer`. |
 | `bttest.CreateTables(ctx, db)` | Initialize schema. Safe to call on existing DB. |
 | `bttest.NewServer(addr, db, ...grpc.ServerOption)` | Start gRPC server. Returns `*Server` with `.Addr` and `.Close()`. |
-| `bttest.CompatibilityLedger()` | Return checked-in intended RPC/field dispositions with observed verification. Not yet updated for v0.5.0 (finding F-2); prefer `BIGTABLE_COMPATIBILITY.md` Appendix A. |
+| `bttest.CompatibilityLedger()` | Return checked-in RPC/field dispositions with their owning tests (89 RPC entries, all `test_verified`); matches `BIGTABLE_COMPATIBILITY.md` Appendix A. |
 
 ## Releasing a New Version
 
@@ -269,7 +267,7 @@ Go caches the module. No `replace` directive needed when using published tags.
 |---------|---------|
 | `v0.3.0` | PostgreSQL backend, instance/cluster admin, change streams |
 | `v0.4.0` | Table deletion protection, IAM stubs, authorized views, backups, logical views, CopyBackup, RestoreTable |
-| `v0.5.0` (unreleased) | Parity iteration against `cloud.google.com/go/bigtable` v1.58.0 (see [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md)): atomic single-row writes with per-entry `MutateRows` codes and idempotency tokens; full filter set (`Interleave` duplicates, `Sink`, `ValueBitmask`) and corrected GC intersection; authorized-view and app-profile enforcement; production-style `ReadRows` chunking, request stats and `SampleRowKeys` ranges; `UndeleteTable`, initial splits, row key schema, aggregate families, schema bundles; durable LRO store and persisted IAM policies; backup data snapshots; opt-in change streams with retention; session protocol; GoogleSQL `PrepareQuery`/`ExecuteQuery`, executable logical views and GoogleSQL continuous materialized views (build tag `gsqlready`). One-way storage migration on first start. Test evidence pending. |
+| `v0.5.0` (`dd5f9e7`) | Parity iteration against `cloud.google.com/go/bigtable` v1.58.0 (see [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md)): atomic single-row writes with per-entry `MutateRows` codes and idempotency tokens; full filter set (`Interleave` duplicates, `Sink`, `ValueBitmask`) and corrected GC intersection; authorized-view and app-profile enforcement; production-style `ReadRows` chunking, request stats and `SampleRowKeys` ranges; `UndeleteTable`, initial splits, row key schema, aggregate families, schema bundles; durable LRO store and persisted IAM policies; backup data snapshots; opt-in change streams with retention; session protocol; GoogleSQL `PrepareQuery`/`ExecuteQuery`, executable logical views and GoogleSQL continuous materialized views; pure-Go multi-platform image build. One-way storage migration on first start. Every registered RPC has a named owning test. |
 
 ## Docker Image (Standalone)
 

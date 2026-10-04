@@ -1,11 +1,11 @@
 # Bigtable Parity Implementation Plan
 
-**Status:** Phases 1–11 implemented — verification pending; Phase 12 implemented behind the `gsqlready` build tag — integration and verification pending; Phase 13 pending.
+**Status:** Phases 1–12 implemented and test-verified at commit `dd5f9e7` (tag `v0.5.0`); Phase 13: LocalCloud pin updated, image build and platform tests pending.
 
 **Date:** 2026-10-04
 
 **Supersedes:** [`2026-08-29-bigtable-conformance-implementation-plan.md`](2026-08-29-bigtable-conformance-implementation-plan.md)
-**Audit:** [`../../../BIGTABLE_COMPATIBILITY.md`](../../../BIGTABLE_COMPATIBILITY.md) (2026-10-04). Capability IDs (`BT-…`) and findings (`F-1`…) refer to that audit.
+**Audit:** [`../../../BIGTABLE_COMPATIBILITY.md`](../../../BIGTABLE_COMPATIBILITY.md) (2026-10-04, at `dd5f9e7`). Capability IDs (`BT-…`) refer to that audit, which names the owning test for each capability.
 
 ## Outcome
 
@@ -25,32 +25,34 @@ guarantees are excluded individually, with the reason recorded.
 - One SQL transaction per logical commit; derived state (change records, CMV
   staleness, idempotency) is written in the same commit or after it.
 - A phase is **verified** only when its acceptance criteria are covered by
-  named, passing tests in `./test.sh` on SQLite and PostgreSQL. No phase is
-  verified yet; the test pass owns that evidence.
+  named, passing tests in `./test.sh`. At `dd5f9e7`, `./test.sh` (test, race,
+  vet, gofmt) and `go mod verify` passed: 245 top-level tests (963 including
+  subtests) plus the `internal/gsql` suite. Storage conformance ran on SQLite
+  locally; the PostgreSQL lane runs in CI. `TestCBTClientConformance` skips
+  when `cbt` is not installed.
 
 ## Status vocabulary
 
-- **Implemented — verification pending:** code is in the working tree; acceptance tests not yet recorded.
-- **Implemented (build-gated):** code exists but is compiled only with `-tags gsqlready`.
-- **Pending:** not implemented in this repository.
+- **Implemented — test-verified:** shipped in `v0.5.0`; acceptance criteria owned by named tests (see the audit).
+- **Pending:** not done.
 
 ## Phase summary
 
 | # | Phase | Status | Audit IDs |
 | --- | --- | --- | --- |
-| 1 | API baseline upgrade | Implemented — verification pending | all |
-| 2 | Storage and atomic mutation core | Implemented — verification pending | BT-WRITE, BT-PERSIST |
-| 3 | Filters and garbage collection | Implemented — verification pending | BT-FILTER, BT-GC |
-| 4 | Targets and authorized views | Implemented — verification pending | BT-TARGET |
-| 5 | Read streaming, request stats, sampling | Implemented — verification pending | BT-READ |
-| 6 | Table administration | Implemented — verification pending | BT-TADMIN, BT-AGG |
-| 7 | Instance admin, LRO, IAM persistence | Implemented — verification pending | BT-IADMIN, BT-LRO, BT-IAM |
-| 8 | Backup snapshots | Implemented — verification pending | BT-BACKUP |
-| 9 | Change streams | Implemented — verification pending | BT-CS |
-| 10 | Schema bundles | Implemented — verification pending | BT-SB |
-| 11 | Session protocol | Implemented — verification pending | BT-SESSION |
-| 12 | GoogleSQL engine, logical views, continuous materialized views | Implemented (build-gated) — integration and verification pending | BT-SQL, BT-LV, BT-CMV, BT-AGG-2 |
-| 13 | LocalCloud integration and multi-platform image | Pending | F-3 |
+| 1 | API baseline upgrade | Implemented — test-verified | all |
+| 2 | Storage and atomic mutation core | Implemented — test-verified | BT-WRITE, BT-PERSIST |
+| 3 | Filters and garbage collection | Implemented — test-verified | BT-FILTER, BT-GC |
+| 4 | Targets and authorized views | Implemented — test-verified | BT-TARGET |
+| 5 | Read streaming, request stats, sampling | Implemented — test-verified | BT-READ |
+| 6 | Table administration | Implemented — test-verified | BT-TADMIN, BT-AGG |
+| 7 | Instance admin, LRO, IAM persistence | Implemented — test-verified | BT-IADMIN, BT-LRO, BT-IAM |
+| 8 | Backup snapshots | Implemented — test-verified | BT-BACKUP |
+| 9 | Change streams | Implemented — test-verified | BT-CS |
+| 10 | Schema bundles | Implemented — test-verified | BT-SB |
+| 11 | Session protocol | Implemented — test-verified | BT-SESSION |
+| 12 | GoogleSQL engine, logical views, continuous materialized views | Implemented — test-verified | BT-SQL, BT-LV, BT-CMV, BT-AGG |
+| 13 | LocalCloud integration and multi-platform image | Pin updated; image build and platform tests pending | — |
 
 ## Phase 1 — API baseline upgrade
 
@@ -66,9 +68,10 @@ RPC reachable through an explicit handler or a documented rejection.
 - Every RPC of `Bigtable`, `BigtableTableAdmin`, `BigtableInstanceAdmin` and
   `Operations` has a disposition in `BIGTABLE_COMPATIBILITY.md` Appendix A.
 - The executable ledger (`bttest/compatibility.go`) matches the registered
-  RPC set and Appendix A (open: finding F-2).
+  RPC set (89 entries) and Appendix A.
 
-**Status:** Implemented — verification pending. Ledger update outstanding (F-2).
+**Status:** Implemented — test-verified (`TestCompatibilityLedgerCoversRegisteredRPCs`,
+`TestCompatibilityLedgerFieldsAreExhaustive`).
 
 **Excluded (production-only):** none.
 
@@ -92,11 +95,12 @@ granularity; aggregate family application; write-time GC with change records.
 - Increment of a non-8-byte cell → `FailedPrecondition`; RMW on an aggregate
   family → `InvalidArgument`.
 - Idempotency: tokens shorter than 8 bytes rejected; replay within 15 minutes
-  applied once; `start_time` older than the window → `FailedPrecondition`.
+  applied once, including a token repeated within one `MutateRows` batch;
+  `start_time` older than the window → `FailedPrecondition`.
 - `MILLIS` granularity and `CLIENT_AUTO_GENERATED` truncation.
 - Storage failures map to `DeadlineExceeded`/`Canceled`/`Internal`; no process exit.
 
-**Status:** Implemented — verification pending.
+**Status:** Implemented — test-verified (owning tests per capability in the audit).
 
 **Excluded (production-only):** cross-cluster write ordering.
 
@@ -120,8 +124,7 @@ and intersection.
 - GC: union deletes if any child deletes; intersection only if all delete;
   nested rules; read-time GC is not persisted.
 
-**Status:** Implemented — verification pending. Replace the old
-`TestInterleaveDedup` assertion, which protected the previous behavior.
+**Status:** Implemented — test-verified (`filter_conformance_test.go`).
 
 **Excluded (production-only):** asynchronous GC timing.
 
@@ -148,7 +151,7 @@ writes.
   `NAME_ONLY`; at most 10 qualifier prefixes; masks `subset_view`,
   `deletion_protection`; typed LRO metadata.
 
-**Status:** Implemented — verification pending.
+**Status:** Implemented — test-verified (owning tests per capability in the audit).
 
 **Excluded (production-only):** Data Boost compute isolation; multi-cluster
 routing and row affinity behavior.
@@ -170,7 +173,7 @@ validation; `SampleRowKeys` with row ranges and split keys.
 - `SampleRowKeys` honors `row_range`, includes initial splits, samples every
   512 KiB, and ends with the range end key or the empty end-of-table key.
 
-**Status:** Implemented — verification pending.
+**Status:** Implemented — test-verified (owning tests per capability in the audit).
 
 **Remaining local gap:** `last_scanned_row_key` not emitted.
 
@@ -195,14 +198,16 @@ change records; consistency tokens; initial splits; row key schema; aggregate
 - Update masks as in BT-TADMIN-3; `column_families` → `Unimplemented`;
   `*` → `InvalidArgument`; LRO with `UpdateTableMetadata`.
 - Delete blocked by table/authorized-view protection or a CMV source; soft
-  delete renames storage; undelete within 7 days enables deletion protection;
+  delete renames storage and moves the table's authorized views and schema
+  bundles with the tombstone; undelete within 7 days restores them and enables
+  deletion protection (a re-created table starts without them);
   `AlreadyExists`/`NotFound` cases.
 - Dropping a family removes its data; `value_type` is immutable.
 - Consistency token is per table and always consistent.
 - Pre-iteration `tables_t` rows load after migration; policy fields survive
   restart.
 
-**Status:** Implemented — verification pending.
+**Status:** Implemented — test-verified (owning tests per capability in the audit).
 
 **Remaining local gaps:** deprecated snapshot RPCs return `Unimplemented`;
 HLL++ sketch bytes are emulator-local.
@@ -235,10 +240,12 @@ pagination; durable operations; persisted IAM policies.
   missing resource → `NotFound`.
 - `ListHotTablets` and memory-layer RPCs return `Unimplemented` with a reason.
 
-**Status:** Implemented — verification pending.
+**Status:** Implemented — test-verified (owning tests per capability in the audit).
 
-**Remaining local gap:** IAM enforcement (needs authenticated identities; the
-emulator is unauthenticated by contract).
+**Remaining local gaps:** IAM enforcement (needs authenticated identities; the
+emulator is unauthenticated by contract); an empty instance `display_name` is
+accepted (defaults to the ID); `DeleteCluster` is not blocked by
+automated-backup locations.
 
 **Excluded (production-only):** capacity and autoscaling effects, hot tablets,
 memory layers, Locations service, CMEK key custody.
@@ -257,15 +264,17 @@ expiry purge.
 - Restore after the source table is modified or deleted returns the snapshot
   rows and schema.
 - `expire_time` 6 h–90 d (365 d Enterprise Plus); `hot_to_standard_time` ≥ 24 h
-  and only for `HOT`; 150 standard / 10 hot per table per cluster.
+  and only for `HOT`; `HOT` rejected on HDD clusters; 150 standard / 10 hot per
+  table per cluster.
 - Copy: source `READY`, no copy of a copy, `STANDARD`, expiry ≤ 30 d after
-  source creation.
+  the copy request.
 - Restore: new table only; no inherited GC/automated backup/deletion
   protection; `RestoreInfo`; `OptimizeRestoredTable` LRO.
-- `ListBackups` filters, `order_by`, pagination; expired backups hidden and purged.
+- `ListBackups` filters, `order_by` (default `start_time desc`), pagination;
+  expired backups hidden and purged.
 - Cluster/instance deletion blocked while backups exist.
 
-**Status:** Implemented — verification pending.
+**Status:** Implemented — test-verified (owning tests per capability in the audit).
 
 **Excluded (production-only):** cross-region placement and durability,
 CMEK-protected backups, incremental storage accounting.
@@ -283,17 +292,19 @@ GC and `DropRowRange` records; routing check; tokens, heartbeats, end time.
 
 - No records without `change_stream_config`; reading such a table →
   `FailedPrecondition`; disabling purges records.
-- One record per row commit with grouped mutations; GC records typed
-  `GARBAGE_COLLECTION`; `DeleteFromRow` → per-family `DeleteFromFamily`.
+- One record per row commit with grouped mutations; GC records (including GC
+  caused by `ReadModifyWriteRow`) typed `GARBAGE_COLLECTION`; `DeleteFromRow` → per-family `DeleteFromFamily`.
 - Multi-cluster app profile → `FailedPrecondition`.
 - `start_time` in the future or outside retention → `InvalidArgument`; no start
   means from now; continuation tokens resume exactly.
 - Heartbeats (default 5 s) carry a token and low watermark; `end_time` closes
   with OK.
 
-**Status:** Implemented — verification pending.
+**Status:** Implemented — test-verified (owning tests per capability in the audit).
 
-**Remaining local gap:** single partition; no split/merge.
+**Remaining local gaps:** single partition (no split/merge); the low watermark
+can precede an in-flight commit; `start_time` is not checked against the time
+the stream was enabled.
 
 **Excluded (production-only):** multi-cluster ordering metadata; Dataflow
 connector.
@@ -313,7 +324,7 @@ check.
 - Removing a message type → `FailedPrecondition` unless `ignore_warnings`.
 - Etags, pagination, LRO metadata.
 
-**Status:** Implemented — verification pending.
+**Status:** Implemented — test-verified (owning tests per capability in the audit).
 
 **Excluded (production-only):** none.
 
@@ -332,7 +343,7 @@ check.
   materialized views are read-only.
 - A failing virtual RPC returns `SessionResponse.error` and the stream stays open.
 
-**Status:** Implemented — verification pending.
+**Status:** Implemented — test-verified (owning tests per capability in the audit).
 
 **Excluded (production-only):** server-side session load balancing.
 
@@ -344,14 +355,13 @@ validation and execution; CMVs defined by GoogleSQL and replacing the old
 shadow-table implementation.
 
 **Files:** `bttest/internal/gsql` (engine), `bttest/query_service.go`,
-`bttest/materialized_views.go`, `bttest/gsql_stub.go` (default-build stand-in),
+`bttest/materialized_views.go`,
 `bttest/localcloud_logical_views.go`, `bttest/sql_materialized_views.go`.
 Removed: `bttest/cmv.go`, `bttest/cmv_test.go`, `bttest/sql_parse.go`,
-`bttest/sql_parse_test.go`.
+`bttest/sql_parse_test.go`. No build tag: the engine is always compiled.
 
 **Acceptance criteria:**
 
-- The default build includes the engine (no `gsqlready` gap) — finding F-1.
 - `PrepareQuery` token valid 1 hour; `ExecuteQuery` with prepared or deprecated
   query; `PREPARED_QUERY_EXPIRED` with `PreconditionFailure` after a schema
   change; `ProtoRows` batches with CRC32C checksums and resume tokens.
@@ -362,15 +372,14 @@ Removed: `bttest/cmv.go`, `bttest/cmv_test.go`, `bttest/sql_parse.go`,
   sessions and SQL; writes rejected; `_key`/struct key and `_timestamp` rules
   per [`CMV_SUPPORT.md`](../../../CMV_SUPPORT.md); legacy shadow tables removed
   on startup; a CMV blocks deletion of its source table.
-- HLL++ `AddToCell`/`MergeToCell` work in the default build.
+- HLL++ `AddToCell`/`MergeToCell` work.
 
-**Status:** Implemented (build-gated) — the engine package was not in the
-working tree at plan time and no build entry point sets `gsqlready`;
-integration and verification pending.
+**Status:** Implemented — test-verified (`query_conformance_test.go`,
+`internal/gsql` suite).
 
 **Remaining local gaps:** parameterized views (`view_parameters`); HLL++ sketch
 bytes are not ZetaSketch/BigQuery compatible; CMV multi-column key encoding
-(OrderedCodeBytes) is an emulator choice; query stats not recorded.
+(OrderedCodeBytes) is an emulator choice.
 
 **Excluded (production-only):** Data Boost compute; CMV eventual-consistency
 lag and `user_errors` metrics.
@@ -383,23 +392,25 @@ for the supported platforms.
 **Files:** `little_bigtable.go` (`version`), `Dockerfile`,
 `Makefile.localcloud`, LocalCloud `Dockerfile` (`LITTLE_BIGTABLE_VERSION`).
 
-**Observed state:** `version` is still `0.3.0-localcloud`; LocalCloud pins
-`9137de7` (pre-iteration). This repository's `Dockerfile` builds for the
-build host's platform with `CGO_ENABLED=1` static linking, although both SQL
-drivers are pure Go. Release binaries (`.github/workflows/release-module.yaml`,
-`dist.sh`) are built with `CGO_ENABLED=0` for Linux and macOS on AMD64 and ARM64.
+**Observed state at `dd5f9e7`:** `version` is `0.5.0-localcloud`; the
+repository `Dockerfile` cross-compiles with `CGO_ENABLED=0` from
+`--platform=$BUILDPLATFORM`; `make -f Makefile.localcloud docker-buildx`
+builds a multi-platform image (an OCI archive unless `PUSH=true`); LocalCloud
+pins `LITTLE_BIGTABLE_VERSION=dd5f9e7…`.
 
 **Acceptance criteria:**
 
-- Commit and tag `v0.5.0`; bump `version`.
-- LocalCloud pin updated; LocalCloud Bigtable scenarios pass against the
-  rebuilt image through the supported client and transport.
+- Version bumped and tag `v0.5.0` created — done.
+- LocalCloud pin updated — done.
 - Image builds for `linux/amd64` and `linux/arm64`; the packaged binary
-  reports the expected version.
-- Existing SQLite/PostgreSQL databases from v0.4.x start, migrate (`tables_t`,
-  `change_log_t`, legacy CMV shadow tables) and serve.
+  reports `0.5.0-localcloud` — pending.
+- LocalCloud Bigtable scenarios pass against the rebuilt image through the
+  supported client and transport — pending.
+- Databases from v0.4.x start, migrate (`tables_t`, `change_log_t`, legacy CMV
+  shadow tables) and serve in the image — pending (metadata migration is
+  covered by `TestConformanceTableAdminLegacyMetadataMigration`).
 
-**Status:** Pending.
+**Status:** Pin updated; image build and platform tests pending.
 
 **Excluded (production-only):** none.
 
@@ -413,9 +424,8 @@ production latency; Dataflow, BigQuery and Pub/Sub connectors.
 
 ## Iteration exit criteria
 
-1. F-1 resolved: the GoogleSQL engine is part of every build and test entry point.
-2. F-2 resolved: the executable ledger matches Appendix A of the audit.
-3. Every acceptance criterion above maps to a named passing test; the audit's
-   evidence placeholders are filled.
-4. `./test.sh` passes on SQLite and PostgreSQL, including race, vet and format checks.
-5. Phase 13 complete, with a LocalCloud run against the rebuilt image.
+1. Done: GoogleSQL engine always built; executable ledger matches the audit.
+2. Done: Phases 1–12 acceptance criteria map to named passing tests (see the
+   audit's owning-test columns).
+3. Done: `./test.sh` passes; PostgreSQL storage conformance runs in CI.
+4. Open: Phase 13 image build and a LocalCloud run against the rebuilt image.

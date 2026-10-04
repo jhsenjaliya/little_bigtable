@@ -1,13 +1,17 @@
 # Continuous Materialized View (CMV) Support
 
-Status as of the 2026-10-04 parity audit ([`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md),
-capabilities BT-CMV-1 and BT-CMV-2). Verification: pending test evidence.
+Status as of `v0.5.0` (commit `dd5f9e7`) and the 2026-10-04 parity audit
+([`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md), capabilities
+BT-CMV-1 and BT-CMV-2). CMVs are implemented on the GoogleSQL engine in
+`bttest/internal/gsql`, which is always built.
 
-> **Build requirement.** CMVs are implemented on the GoogleSQL engine in
-> `bttest/internal/gsql`, compiled only with `-tags gsqlready`
-> (`bttest/materialized_views.go`). In the default build
-> (`bttest/gsql_stub.go`) every materialized-view RPC returns `Unimplemented`
-> ("GoogleSQL is not available in this build"). See audit finding F-1.
+Owning tests: `TestConformanceMaterializedViewReadsAndRefresh`,
+`TestConformanceMaterializedViewSurvivesRestart`,
+`TestConformanceMaterializedViewSession` (`bttest/query_conformance_test.go`);
+`TestMaterializedViewAggregations`, `TestMaterializedViewSecondaryIndex`,
+`TestMaterializedViewRejections` (`bttest/internal/gsql/mv_test.go`);
+`TestOrderedCodeStructExamples`, `TestOrderedCodeStructPreservesOrder`
+(`bttest/internal/gsql/keycodec_test.go`).
 
 ## Overview
 
@@ -53,8 +57,8 @@ From "Continuous materialized view queries" (docs fetched 2026-10-04):
 - Optional `_timestamp` column of type `TIMESTAMP` sets the cell timestamp.
 - `LIMIT`/`OFFSET` and nested `GROUP BY`/`ORDER BY` are not allowed.
 
-Which of these rules the emulator's engine rejects at create time is
-**pending test evidence**.
+The engine rejects invalid definitions at create time; rejected shapes are
+covered by `TestMaterializedViewRejections`.
 
 ## Storage layout
 
@@ -120,7 +124,6 @@ shadow table** named after the view.
 
 ## Known limitations
 
-- Build-gated (F-1).
 - Multi-column key encoding is emulator-specific.
 - `_timestamp` is truncated to milliseconds; production treats non-multiples of
   1,000 as invalid rows (counted in `materialized_view/user_errors`).

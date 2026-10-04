@@ -39,7 +39,7 @@ GOPRIVATE=github.com/jhsenjaliya/* \
 | Version | Changes |
 |---------|---------|
 | `v0.0.1` | Initial extended emulator: PostgreSQL persistence, instance/cluster admin, change streams, IAM stubs, authorized views, backups, logical views, deletion protection, AddToCell/MergeToCell |
-| `v0.5.0` (unreleased) | Parity iteration against `cloud.google.com/go/bigtable` v1.58.0; see [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md) and [`docs/superpowers/plans/2026-10-04-bigtable-parity-implementation-plan.md`](docs/superpowers/plans/2026-10-04-bigtable-parity-implementation-plan.md). Atomic writes, full filter set, authorized-view/app-profile enforcement, `ReadRows` chunking and stats, `UndeleteTable`, schema bundles, durable LROs, persisted IAM, backup snapshots, opt-in change streams, session protocol, GoogleSQL query/logical views/continuous materialized views (build tag `gsqlready`). One-way storage migration on first start. LocalCloud still pins the pre-iteration commit `9137de7`; update `LITTLE_BIGTABLE_VERSION` after release. Test evidence pending. |
+| `v0.5.0` (`dd5f9e7`) | Parity iteration against `cloud.google.com/go/bigtable` v1.58.0; see [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md) and [`docs/superpowers/plans/2026-10-04-bigtable-parity-implementation-plan.md`](docs/superpowers/plans/2026-10-04-bigtable-parity-implementation-plan.md). Atomic writes, full filter set, authorized-view/app-profile enforcement, `ReadRows` chunking and stats, `UndeleteTable`, schema bundles, durable LROs, persisted IAM, backup snapshots, opt-in change streams, session protocol, GoogleSQL query/logical views/continuous materialized views; pure-Go multi-platform image. One-way storage migration on first start. LocalCloud pins `dd5f9e7`; LocalCloud image build and platform tests pending. |
 
 ### Important notes
 
@@ -76,11 +76,9 @@ go build -o little_bigtable .
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o little_bigtable .
 ```
 
-The LocalCloud image build and this repository's `Dockerfile` still use
-`CGO_ENABLED=1` with external static linking; no dependency requires it.
-GoogleSQL features additionally need `-tags gsqlready` and the
-`bttest/internal/gsql` package (finding F-1 in
-[`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md)).
+The repository `Dockerfile` builds the same way (`CGO_ENABLED=0`, cross-compiled
+from `--platform=$BUILDPLATFORM`); `make -f Makefile.localcloud docker-buildx`
+builds a multi-platform image. The GoogleSQL engine is always built.
 
 ### Run tests
 

@@ -8,10 +8,9 @@ it into Go projects as a library, release new versions, and build Docker images.
 ### Prerequisites
 
 - Go 1.27.0
-- C compiler (`gcc` or `clang`) — required for SQLite via `go-sqlite3`
-- macOS: `xcode-select --install`
-- Ubuntu/Debian: `apt-get install gcc`
-- Alpine: `apk add gcc musl-dev`
+- No C compiler. Both SQL drivers are pure Go: SQLite uses
+  `github.com/glebarez/go-sqlite` (registered under the driver name `sqlite3`
+  in `little_bigtable.go`) and PostgreSQL uses `github.com/lib/pq`.
 
 ### Build the binary
 
@@ -29,13 +28,22 @@ go build -o little_bigtable .
 ### Build a static binary (for containers)
 
 ```bash
-CGO_ENABLED=1 go build \
-  -trimpath \
-  -ldflags="-s -w -linkmode external -extldflags -static" \
-  -o little_bigtable .
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o little_bigtable .
 ```
 
-Requires static libc (Alpine: `musl-dev`, Debian: install `musl-tools`).
+This is how the release workflow and `dist.sh` build the Linux and macOS
+AMD64/ARM64 binaries. The repository `Dockerfile` (and the LocalCloud image
+build) still use `CGO_ENABLED=1` with external static linking and install
+`gcc musl-dev`; that works but is not required by any dependency.
+
+### GoogleSQL build tag
+
+`PrepareQuery`, `ExecuteQuery`, materialized views, logical-view query
+validation and HLL++ aggregates are compiled only with `-tags gsqlready` and
+need the engine package `bttest/internal/gsql`. Without the tag,
+`bttest/gsql_stub.go` makes those RPCs return `Unimplemented`. No build entry
+point sets the tag yet; see finding F-1 in
+[`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md).
 
 ### Run tests
 
@@ -110,24 +118,12 @@ local development. CI/CD should pull from GitHub.
 
 | Backend | CGO required | C compiler needed | Notes |
 |---------|-------------|-------------------|-------|
-| SQLite | Yes | Yes (`gcc` or `clang`) | `go-sqlite3` is a CGO wrapper |
+| SQLite | No | No | `github.com/glebarez/go-sqlite` is pure Go; register it as `sqlite3` |
 | PostgreSQL | No | No | `lib/pq` is pure Go |
 
-For SQLite, ensure a C compiler is available:
-
-```bash
-# macOS — included with Xcode CLI tools
-xcode-select --install
-
-# Ubuntu/Debian
-apt-get install gcc
-
-# Alpine
-apk add gcc musl-dev
-```
-
-PostgreSQL mode avoids CGO entirely — recommended for CI environments without
-C toolchains.
+The `bttest` package does not import a driver. Register one in your program;
+for SQLite, call `sqlite.RegisterAsSQLITE3()` so the `sqlite3` driver name used
+by `bttest.ConfigureStorage("sqlite3", …)` resolves.
 
 ### Import and start
 
@@ -139,11 +135,13 @@ import (
     "database/sql"
     "log"
 
+    sqlite "github.com/glebarez/go-sqlite" // SQLite driver (pure Go)
     "github.com/jhsenjaliya/little_bigtable/bttest"
-    _ "github.com/mattn/go-sqlite3"  // SQLite driver (CGO)
-    // _ "github.com/lib/pq"         // PostgreSQL driver (pure Go, no CGO)
+    // _ "github.com/lib/pq"               // PostgreSQL driver (pure Go)
     "google.golang.org/grpc"
 )
+
+func init() { sqlite.RegisterAsSQLITE3() } // register as "sqlite3"
 
 func StartBigtableEmulator(ctx context.Context) (*bttest.Server, error) {
     bttest.ConfigureStorage("sqlite3", true)
@@ -226,7 +224,7 @@ db, err := sql.Open("postgres", "postgres://user@localhost/bigtable?sslmode=disa
 | `bttest.ConfigureStorage(driver, strictAdmin)` | Set SQL dialect and admin mode. Call before `NewServer`. |
 | `bttest.CreateTables(ctx, db)` | Initialize schema. Safe to call on existing DB. |
 | `bttest.NewServer(addr, db, ...grpc.ServerOption)` | Start gRPC server. Returns `*Server` with `.Addr` and `.Close()`. |
-| `bttest.CompatibilityLedger()` | Return checked-in intended RPC/field dispositions with observed verification; runtime registration and high-risk message fields are tested for drift. |
+| `bttest.CompatibilityLedger()` | Return checked-in intended RPC/field dispositions with observed verification. Not yet updated for v0.5.0 (finding F-2); prefer `BIGTABLE_COMPATIBILITY.md` Appendix A. |
 
 ## Releasing a New Version
 
@@ -271,6 +269,7 @@ Go caches the module. No `replace` directive needed when using published tags.
 |---------|---------|
 | `v0.3.0` | PostgreSQL backend, instance/cluster admin, change streams |
 | `v0.4.0` | Table deletion protection, IAM stubs, authorized views, backups, logical views, CopyBackup, RestoreTable |
+| `v0.5.0` (unreleased) | Parity iteration against `cloud.google.com/go/bigtable` v1.58.0 (see [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md)): atomic single-row writes with per-entry `MutateRows` codes and idempotency tokens; full filter set (`Interleave` duplicates, `Sink`, `ValueBitmask`) and corrected GC intersection; authorized-view and app-profile enforcement; production-style `ReadRows` chunking, request stats and `SampleRowKeys` ranges; `UndeleteTable`, initial splits, row key schema, aggregate families, schema bundles; durable LRO store and persisted IAM policies; backup data snapshots; opt-in change streams with retention; session protocol; GoogleSQL `PrepareQuery`/`ExecuteQuery`, executable logical views and GoogleSQL continuous materialized views (build tag `gsqlready`). One-way storage migration on first start. Test evidence pending. |
 
 ## Docker Image (Standalone)
 

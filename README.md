@@ -14,61 +14,75 @@ For the audited feature and conformance contract, see
 | **Storage** | In-Memory                                                        | sqlite3 or postgres     | Distributed GFS              |
 | **Type**    | Emulator                                                         | Emulator                | Managed Production Datastore |
 | **Scaling** | Single process                                                   | Single process          | Scalable multi-node backend  |
-| **GC**      | async GC                                                         | per-row GC at read time |                              |
+| **GC**      | async GC                                                         | per-row GC at read and write time |                    |
 
 ## Features
 
-### Data Plane (gRPC)
+Status follows the 2026-10-04 parity audit in
+[`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md), which is the current
+contract. Behavior is implemented in source; test evidence for this release is
+pending.
 
-- **ReadRows** — table-targeted row keys/ranges, filters, reversed scans, and row limits; production chunking, statistics, and view targets remain partial
-- **MutateRow / MutateRows** — table-targeted SetCell and delete success paths; rollback-safe mixed-failure behavior is not yet conformant
-- **CheckAndMutateRow** — predicate-selected table mutations on success paths; failed-request rollback is not yet conformant
-- **ReadModifyWriteRow** — append and increment success paths; failed-request rollback is not yet conformant
-- **SampleRowKeys** — deterministic table sampling; range-restricted and view-target sampling are not yet conformant
-- **PingAndWarm** — successful liveness no-op
+### Data plane (gRPC)
+
+- **MutateRow / MutateRows / CheckAndMutateRow / ReadModifyWriteRow** — single-row
+  atomicity (all mutations validated before any is applied), per-entry
+  `MutateRows` status codes, idempotency tokens, timestamp granularity, and
+  aggregate (Sum/Min/Max Int64, HLL++) families.
+- **ReadRows** — table, authorized-view and materialized-view targets,
+  production-style chunking, `REQUEST_STATS_FULL` request stats.
+- **SampleRowKeys** — honors `row_range`, includes initial split keys, samples
+  every 512 KiB.
+- **Filters** — every `RowFilter` variant, validated before reading, including
+  `Interleave` (keeps duplicates), `Sink`, `Condition` and `ValueBitmask`.
+- **App profiles** — resolved per request; routing rules enforced for
+  transactional RPCs, change streams and Data Boost writes.
+- **Change streams** — opt-in per table via `change_stream_config`, 1–7 day
+  retention, grouped per-row records including GC and `DropRowRange`, one
+  partition, heartbeats and continuation tokens.
+- **Session protocol** — `GetClientConfiguration`, `OpenTable`,
+  `OpenAuthorizedView`, `OpenMaterializedView`.
+- **GoogleSQL** — `PrepareQuery` / `ExecuteQuery` over tables, logical views and
+  materialized views. Requires the `gsqlready` build (see Limitations).
+- **PingAndWarm** — validates the instance and app profile.
 
 ### Admin (gRPC)
 
-- **Instance CRUD** — Create, Get, List, Update, Delete instances
-- **Table CRUD** — Create, List, Get, Delete tables
-- **Column Families** — ModifyColumnFamilies (add/drop)
-- **Row Ranges** — DropRowRange (by prefix or delete all)
-- **Consistency** — GenerateConsistencyToken, CheckConsistency
-- **Materialized Views (CMV)** — Create, Get, List, Update, Delete with write-time sync and delete propagation
-
-### Filters
-
-Supported row filters: Chain, Interleave, Condition, PassAll, BlockAll,
-RowKeyRegex, RowSample, FamilyNameRegex, ColumnQualifierRegex, ColumnRange,
-TimestampRange, ValueRange, ValueRegex, CellsPerColumnLimit, CellsPerRowLimit,
-CellsPerRowOffset, StripValueTransformer, ApplyLabelTransformer.
-
-Sink is recognized but currently behaves as a partial no-op rather than
-production-equivalent sink suppression.
+- **Tables** — validated create (initial splits, aggregate types, row key
+  schema, change stream config), views, `UpdateTable` masks, soft delete and
+  `UndeleteTable` (7 days), atomic `ModifyColumnFamilies`, `DropRowRange`,
+  consistency tokens.
+- **Authorized views** — CRUD with etags and deletion protection; enforced on
+  reads and writes.
+- **Backups** — data snapshots, copy, restore to a new table, expiry and quota
+  rules, filtered listing.
+- **Schema bundles** — CRUD with descriptor validation.
+- **Logical views** and **continuous materialized views** — GoogleSQL
+  definitions (see [`CMV_SUPPORT.md`](CMV_SUPPORT.md)); require the `gsqlready` build.
+- **Instances, clusters, app profiles** — validated metadata CRUD, pagination,
+  guarded deletion.
+- **Long-running operations** — durable Get/List/Wait/Delete/Cancel.
+- **IAM policies** — persisted with etags; not enforced.
 
 ### Persistence
 
-The following SQL-backed resource state is persisted (to SQLite or PostgreSQL,
-per `-database-driver`) and survives emulator restarts:
+The following state is persisted to SQLite or PostgreSQL (per
+`-database-driver`) and survives emulator restarts:
 
-- `instances_t` / `clusters_t` / `app_profiles_t` — instance, cluster, and app profile metadata
-- `tables_t` — table definitions and column families
-- `rows_t` — row keys and cell data
-- `materialized_views_t` — CMV registrations
-- `authorized_views_t` / `logical_views_t` / `backups_t` — authorized views, logical views, and backups
-- `change_log_t` — change stream mutation log
+- `rows_t` — row data (tables, tombstoned tables, backup snapshots, materialized-view storage)
+- `tables_t` — table metadata
+- `instances_t` / `clusters_t` / `app_profiles_t` — instance, cluster and app-profile metadata
+- `authorized_views_t` / `logical_views_t` / `materialized_views_t` / `schema_bundles_t` — view and schema-bundle definitions
+- `backups_t` / `backup_manifests_t` — backups and their schema manifests
+- `change_stream_t` — change-stream records
+- `iam_policies_t` — IAM policies
+- `operations_t` — long-running operations
+- `idempotency_t` — mutation idempotency tokens
 
-IAM policies remain in memory only. Some resource update paths also have
-documented persistence limits; see
-[`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md) for exact contracts.
-
-### Forward Compatibility
-
-Most methods without local support, such as ExecuteQuery, OpenTable, and
-snapshot RPCs, return `codes.Unimplemented`. Known false-success gaps in
-data-bearing backup and change-stream handlers remain explicitly recorded in
-`bttest.CompatibilityLedger()` until their owning conformance phases replace
-that behavior. `PingAndWarm` is a deterministic local no-op.
+On first start, a database from an earlier release is migrated one way: table
+metadata is rewritten in the new format, `change_log_t` is dropped, and legacy
+materialized-view shadow tables are removed. Back up the database before
+upgrading if you may need to downgrade.
 
 ## Usage
 
@@ -101,11 +115,10 @@ export BIGTABLE_EMULATOR_HOST="127.0.0.1:9000"
 
 ### Running with Docker (Persistent Storage)
 
-`little_bigtable` stores its SQL-backed resource metadata, tables, column
-families, and row data in a single SQLite database file. In-memory state such as
-IAM policies is not included. When running in a container, mount a volume for
-the database path so persisted state survives container restarts, updates, and
-recreations.
+With `-database-driver sqlite3`, `little_bigtable` stores all persisted state
+(see [Persistence](#persistence)) in a single SQLite database file. When running
+in a container, mount a volume for the database path so persisted state
+survives container restarts, updates, and recreations.
 
 > **Note:** Always pass `-host 0.0.0.0` inside a container so the gRPC server binds to all interfaces rather than container loopback (`localhost`/`127.0.0.1`).
 
@@ -242,10 +255,23 @@ git push origin <your-branch>
 
 ## Limitations
 
-- **Non-production features** (snapshots and GoogleSQL queries) return `codes.Unimplemented`.
-- **GoogleSQL queries** (ExecuteQuery/PrepareQuery) are not supported.
-- **Session protocol** (OpenTable/OpenAuthorizedView/OpenMaterializedView) is not implemented — not needed for correctness with standard SDK usage.
-- Cluster resources support metadata CRUD, but real clustering, multi-node capacity, multi-region operation, and replication are not supported.
-- Some GC rule types (Intersection) are not fully supported.
-- CMV shadow tables do not auto-update when source table column families change after CMV creation.
-- Some filters are not implemented or have partial support. See [cbtemulator docs](https://cloud.google.com/bigtable/docs/emulator#filters)
+See [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md) for the full list.
+
+- **GoogleSQL is build-gated.** `PrepareQuery`, `ExecuteQuery`, materialized
+  views, logical-view query validation and HLL++ aggregates need the GoogleSQL
+  engine (`bttest/internal/gsql`, build tag `gsqlready`). The default build
+  returns `Unimplemented` for these.
+- **Production-only behavior is not emulated:** replication, failover and
+  multi-cluster consistency (consistency checks always succeed), autoscaling
+  and node capacity, hot tablets (`ListHotTablets` returns `Unimplemented`),
+  memory layers (`Unimplemented`), the Locations service (not registered),
+  Data Boost compute, CMEK key custody, Cloud Monitoring and Key Visualizer,
+  production latency, and Dataflow/BigQuery/Pub/Sub connectors.
+- **IAM is not enforced.** The emulator is unauthenticated;
+  `TestIamPermissions` grants every requested permission.
+- Change streams use a single partition; partition split/merge is not produced.
+- `ReadRows` does not emit `last_scanned_row_key`.
+- HLL++ sketch bytes are emulator-specific, not ZetaSketch/BigQuery compatible.
+- Multi-column materialized-view row keys use an emulator-specific encoding.
+- Parameterized logical views (`view_parameters`) are not supported.
+- Deprecated table snapshot RPCs return `Unimplemented`; use backups.

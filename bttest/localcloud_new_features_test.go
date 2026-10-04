@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"testing"
+	"time"
 
 	btapb "cloud.google.com/go/bigtable/admin/apiv2/adminpb"
 	btpb "cloud.google.com/go/bigtable/apiv2/bigtablepb"
@@ -28,19 +29,7 @@ func newFullTestServer(t *testing.T) (*server, string) {
 	db.SetMaxOpenConns(1)
 	CreateTables(ctx, db)
 
-	s := &server{
-		tables:            make(map[string]*table),
-		materializedViews: make(map[string]*btapb.MaterializedView),
-		db:                db,
-		tableBackend:      NewSqlTables(db),
-		adminBackend:      NewSqlAdminMetadata(db),
-		changeLog:         NewSqlChangeLog(db),
-		mvBackend:         NewSqlMaterializedViews(db),
-		avBackend:         NewSqlAuthorizedViews(db),
-		backupBackend:     NewSqlBackups(db),
-		lvBackend:         NewSqlLogicalViews(db),
-		cmvs:              newCMVRegistry(),
-	}
+	s := newServerState(db)
 	parent := "projects/test/instances/test"
 	return s, parent
 }
@@ -93,6 +82,10 @@ func TestIAMStubs_Permissive(t *testing.T) {
 	ctx := context.Background()
 
 	resource := parent + "/tables/t1"
+	_, err := s.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resource})
+	assert.Equal(t, codes.NotFound, status.Code(err), "IAM on a missing resource")
+	_, err = s.CreateTable(ctx, &btapb.CreateTableRequest{Parent: parent, TableId: "t1"})
+	require.NoError(t, err)
 
 	// GetIamPolicy returns empty policy for unknown resource.
 	policy, err := s.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resource})
@@ -221,7 +214,7 @@ func TestBackups_CRUD(t *testing.T) {
 		BackupId: "bk1",
 		Backup: &btapb.Backup{
 			SourceTable: parent + "/tables/src",
-			ExpireTime:  timestamppb.Now(),
+			ExpireTime:  timestamppb.New(time.Now().Add(7 * 24 * time.Hour)),
 		},
 	})
 	require.NoError(t, err)
@@ -237,7 +230,7 @@ func TestBackups_CRUD(t *testing.T) {
 	assert.Equal(t, parent+"/tables/src", backup.SourceTable)
 
 	// Update expire time.
-	newExpire := timestamppb.Now()
+	newExpire := timestamppb.New(time.Now().Add(14 * 24 * time.Hour))
 	updated, err := s.UpdateBackup(ctx, &btapb.UpdateBackupRequest{
 		Backup:     &btapb.Backup{Name: backupName, ExpireTime: newExpire},
 		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"expire_time"}},
@@ -272,7 +265,7 @@ func TestCopyBackup(t *testing.T) {
 	_, err = s.CreateBackup(ctx, &btapb.CreateBackupRequest{
 		Parent:   cluster,
 		BackupId: "original",
-		Backup:   &btapb.Backup{SourceTable: parent + "/tables/src", ExpireTime: timestamppb.Now()},
+		Backup:   &btapb.Backup{SourceTable: parent + "/tables/src", ExpireTime: timestamppb.New(time.Now().Add(7 * 24 * time.Hour))},
 	})
 	require.NoError(t, err)
 
@@ -281,7 +274,7 @@ func TestCopyBackup(t *testing.T) {
 		Parent:       cluster,
 		BackupId:     "copy1",
 		SourceBackup: cluster + "/backups/original",
-		ExpireTime:   timestamppb.Now(),
+		ExpireTime:   timestamppb.New(time.Now().Add(7 * 24 * time.Hour)),
 	})
 	require.NoError(t, err)
 	assert.True(t, op.Done)
@@ -314,7 +307,7 @@ func TestRestoreTable(t *testing.T) {
 	_, err = s.CreateBackup(ctx, &btapb.CreateBackupRequest{
 		Parent:   cluster,
 		BackupId: "bk1",
-		Backup:   &btapb.Backup{SourceTable: parent + "/tables/src", ExpireTime: timestamppb.Now()},
+		Backup:   &btapb.Backup{SourceTable: parent + "/tables/src", ExpireTime: timestamppb.New(time.Now().Add(7 * 24 * time.Hour))},
 	})
 	require.NoError(t, err)
 
@@ -337,6 +330,7 @@ func TestRestoreTable(t *testing.T) {
 
 func TestLogicalViews_CRUD(t *testing.T) {
 	s, parent := newFullTestServer(t)
+	mustCreateTable(t, s, parent, "t1", "cf1")
 	ctx := context.Background()
 
 	// Create.
@@ -388,6 +382,8 @@ func TestLogicalViews_CRUD(t *testing.T) {
 
 func TestLogicalViews_UpdateQuery(t *testing.T) {
 	s, parent := newFullTestServer(t)
+	mustCreateTable(t, s, parent, "t1", "cf1")
+	mustCreateTable(t, s, parent, "t2", "col1")
 	ctx := context.Background()
 
 	_, err := s.CreateLogicalView(ctx, &btapb.CreateLogicalViewRequest{
@@ -421,7 +417,7 @@ func TestAddToCell_Int64Sum(t *testing.T) {
 	_, err = s.ModifyColumnFamilies(ctx, &btapb.ModifyColumnFamiliesRequest{
 		Name: parent + "/tables/agg",
 		Modifications: []*btapb.ModifyColumnFamiliesRequest_Modification{
-			{Id: "cf1", Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{Create: &btapb.ColumnFamily{}}},
+			{Id: "cf1", Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{Create: sumFamily()}},
 		},
 	})
 	require.NoError(t, err)
@@ -482,7 +478,7 @@ func TestMergeToCell_Int64Sum(t *testing.T) {
 	_, err = s.ModifyColumnFamilies(ctx, &btapb.ModifyColumnFamiliesRequest{
 		Name: parent + "/tables/merge",
 		Modifications: []*btapb.ModifyColumnFamiliesRequest_Modification{
-			{Id: "cf1", Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{Create: &btapb.ColumnFamily{}}},
+			{Id: "cf1", Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{Create: sumFamily()}},
 		},
 	})
 	require.NoError(t, err)
@@ -588,7 +584,7 @@ func TestAddToCell_DifferentTimestamps(t *testing.T) {
 	_, err = s.ModifyColumnFamilies(ctx, &btapb.ModifyColumnFamiliesRequest{
 		Name: parent + "/tables/agg2",
 		Modifications: []*btapb.ModifyColumnFamiliesRequest_Modification{
-			{Id: "cf1", Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{Create: &btapb.ColumnFamily{}}},
+			{Id: "cf1", Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{Create: sumFamily()}},
 		},
 	})
 	require.NoError(t, err)
@@ -653,7 +649,7 @@ func TestMergeToCell_RawValueInput(t *testing.T) {
 	_, err = s.ModifyColumnFamilies(ctx, &btapb.ModifyColumnFamiliesRequest{
 		Name: parent + "/tables/mrg2",
 		Modifications: []*btapb.ModifyColumnFamiliesRequest_Modification{
-			{Id: "cf1", Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{Create: &btapb.ColumnFamily{}}},
+			{Id: "cf1", Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{Create: sumFamily()}},
 		},
 	})
 	require.NoError(t, err)
@@ -715,7 +711,7 @@ func TestCreateBackup_MissingSourceTable(t *testing.T) {
 		BackupId: "bk1",
 		Backup: &btapb.Backup{
 			SourceTable: parent + "/tables/nonexistent",
-			ExpireTime:  timestamppb.Now(),
+			ExpireTime:  timestamppb.New(time.Now().Add(7 * 24 * time.Hour)),
 		},
 	})
 	require.Error(t, err)
@@ -749,7 +745,7 @@ func TestRestoreTable_AlreadyExists(t *testing.T) {
 		BackupId: "bk1",
 		Backup: &btapb.Backup{
 			SourceTable: parent + "/tables/existing",
-			ExpireTime:  timestamppb.Now(),
+			ExpireTime:  timestamppb.New(time.Now().Add(7 * 24 * time.Hour)),
 		},
 	})
 	require.NoError(t, err)
@@ -776,7 +772,7 @@ func TestAuthorizedView_TableNotFound(t *testing.T) {
 	assert.Equal(t, codes.NotFound, status.Code(err))
 }
 
-func TestInterleaveDedup(t *testing.T) {
+func TestInterleaveKeepsDuplicates(t *testing.T) {
 	s, parent := newFullTestServer(t)
 	ctx := context.Background()
 
@@ -807,8 +803,8 @@ func TestInterleaveDedup(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Interleave: FamilyNameRegex("fam1") OR ColumnQualifierRegex("col1")
-	// Both filters match the same cell. Should return 1 cell, not 2.
+	// Interleave: FamilyNameRegex("fam1") OR ColumnQualifierRegex("col1").
+	// Both branches match the same cell; Bigtable returns both copies.
 	mock := &MockReadRowsServer{}
 	err = s.ReadRows(&btpb.ReadRowsRequest{
 		TableName: tableName,
@@ -824,5 +820,25 @@ func TestInterleaveDedup(t *testing.T) {
 	}, mock)
 	require.NoError(t, err)
 	require.Len(t, mock.responses, 1)
-	assert.Len(t, mock.responses[0].Chunks, 1, "interleave should deduplicate identical cells")
+	assert.Len(t, mock.responses[0].Chunks, 2, "interleave must keep duplicate cells from each matching branch")
+}
+
+// sumFamily is an Int64 sum aggregate column family.
+func sumFamily() *btapb.ColumnFamily {
+	return &btapb.ColumnFamily{ValueType: &btapb.Type{Kind: &btapb.Type_AggregateType{AggregateType: &btapb.Type_Aggregate{
+		InputType:  &btapb.Type{Kind: &btapb.Type_Int64Type{Int64Type: &btapb.Type_Int64{Encoding: &btapb.Type_Int64_Encoding{Encoding: &btapb.Type_Int64_Encoding_BigEndianBytes_{BigEndianBytes: &btapb.Type_Int64_Encoding_BigEndianBytes{}}}}}},
+		Aggregator: &btapb.Type_Aggregate_Sum_{Sum: &btapb.Type_Aggregate_Sum{}},
+	}}}}
+}
+
+// mustCreateTable creates a table with plain column families.
+func mustCreateTable(t *testing.T, s *server, parent, id string, families ...string) {
+	t.Helper()
+	fams := map[string]*btapb.ColumnFamily{}
+	for _, f := range families {
+		fams[f] = &btapb.ColumnFamily{}
+	}
+	if _, err := s.CreateTable(context.Background(), &btapb.CreateTableRequest{Parent: parent, TableId: id, Table: &btapb.Table{ColumnFamilies: fams}}); err != nil {
+		t.Fatal(err)
+	}
 }

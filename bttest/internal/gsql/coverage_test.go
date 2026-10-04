@@ -1,0 +1,84 @@
+package gsql
+
+import (
+	"context"
+	"strings"
+	"sync"
+	"testing"
+
+	btpb "cloud.google.com/go/bigtable/apiv2/bigtablepb"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// documentedFunctions is the function list of the GoogleSQL for Bigtable
+// reference ("Functions (alphabetical)").
+var documentedFunctions = strings.Fields(`ABS ACOS ACOSH ANY_VALUE APPROX_COUNT_DISTINCT APPROX_QUANTILES APPROX_TOP_COUNT
+APPROX_TOP_SUM ARRAY_AGG ARRAY_CONCAT ARRAY_CONCAT_AGG ARRAY_FILTER ARRAY_FIRST ARRAY_INCLUDES ARRAY_INCLUDES_ALL
+ARRAY_INCLUDES_ANY ARRAY_IS_DISTINCT ARRAY_LAST ARRAY_LAST_N ARRAY_LENGTH ARRAY_OFFSET ARRAY_OFFSETS ARRAY_REVERSE
+ARRAY_SLICE ARRAY_TO_STRING ARRAY_TRANSFORM ASCII ASIN ASINH ATAN ATAN2 ATANH AVG BIT_AND BIT_OR BIT_XOR BYTE_LENGTH
+CAST CEIL CEILING CHAR_LENGTH CHR CODE_POINTS_TO_BYTES CODE_POINTS_TO_STRING CONCAT CORR COS COSH COSINE_DISTANCE COT
+COTH COUNT COUNTIF COVAR_POP COVAR_SAMP CSC CSCH CUME_DIST CURRENT_DATE CURRENT_TIMESTAMP DATE DATE_ADD DATE_DIFF
+DATE_FROM_UNIX_DATE DATE_SUB DATE_TRUNC DENSE_RANK DIV ENDS_WITH EUCLIDEAN_DISTANCE EXP EXTRACT FIRST_VALUE FLOOR FORMAT
+FORMAT_DATE FORMAT_TIMESTAMP FROM_BASE32 FROM_BASE64 FROM_HEX GENERATE_ARRAY GENERATE_DATE_ARRAY GENERATE_TIMESTAMP_ARRAY
+GREATEST HLL_COUNT.EXTRACT HLL_COUNT.INIT HLL_COUNT.MERGE HLL_COUNT.MERGE_PARTIAL IEEE_DIVIDE IFERROR INITCAP INSTR
+IS_INF IS_NAN ISERROR JSON_EXTRACT JSON_EXTRACT_SCALAR JSON_QUERY JSON_QUERY_ARRAY JSON_VALUE LAG LAST_DAY LAST_VALUE
+LEAD LEAST LEFT LENGTH LN LOG LOG10 LOGICAL_AND LOGICAL_OR LOWER LPAD LTRIM MAP_CONTAINS_KEY MAP_EMPTY MAP_ENTRIES
+MAP_KEYS MAP_VALUES MAX MIN MOD NORMALIZE NORMALIZE_AND_CASEFOLD NTH_VALUE NTILE NULLIFERROR OCTET_LENGTH PARSE_DATE
+PARSE_TIMESTAMP PERCENT_RANK PERCENTILE_CONT PERCENTILE_DISC POW POWER RAND RANK REGEXP_CONTAINS REGEXP_EXTRACT
+REGEXP_EXTRACT_ALL REGEXP_INSTR REGEXP_REPLACE REPEAT REPLACE REVERSE RIGHT ROUND ROW_NUMBER RPAD RTRIM
+S2_CELLIDFROMPOINT S2_COVERINGCELLIDS SAFE_ADD SAFE_CAST SAFE_CONVERT_BYTES_TO_STRING SAFE_DIVIDE SAFE_MULTIPLY
+SAFE_NEGATE SAFE_SUBTRACT SEC SECH SIGN SIN SINH SOUNDEX SPLIT SQRT ST_ACCUM ST_AREA ST_DISTANCE ST_GEOGPOINT
+ST_UNION_AGG STARTS_WITH STDDEV STDDEV_POP STDDEV_SAMP STRING STRING_AGG STRPOS SUBSTR SUBSTRING SUM TAN TANH TIMESTAMP
+TIMESTAMP_ADD TIMESTAMP_DIFF TIMESTAMP_FROM_UNIX_MICROS TIMESTAMP_FROM_UNIX_MILLIS TIMESTAMP_FROM_UNIX_SECONDS
+TIMESTAMP_MICROS TIMESTAMP_MILLIS TIMESTAMP_SECONDS TIMESTAMP_SUB TIMESTAMP_TRUNC TO_BASE32 TO_BASE64 TO_CODE_POINTS
+TO_FLOAT32 TO_FLOAT64 TO_HEX TO_INT64 TO_JSON_STRING TO_VECTOR32 TO_VECTOR64 TRANSLATE TRIM TRUNC UNICODE UNIX_DATE
+UNIX_MICROS UNIX_MILLIS UNIX_SECONDS UNPACK UPPER VAR_POP VAR_SAMP VARIANCE`)
+
+func TestDocumentedFunctionsResolve(t *testing.T) {
+	syntax := setOf("CAST", "SAFE_CAST", "EXTRACT", "UNPACK")
+	cat, _ := stdCatalog()
+	for _, name := range documentedFunctions {
+		if syntax[name] {
+			continue
+		}
+		if _, ok := scalarFuncs[name]; ok {
+			continue
+		}
+		if _, ok := aggFuncs[name]; ok {
+			continue
+		}
+		what, ok := unsupportedFunction(name)
+		require.True(t, ok, "documented function %s is neither implemented nor reported as unsupported", name)
+		require.NotEmpty(t, what)
+		_, _, err := execQuery(cat, "SELECT "+name+"(1) FROM t", qopt{})
+		require.Equal(t, codes.Unimplemented, status.Code(err), name)
+		require.Contains(t, status.Convert(err).Message(), name)
+	}
+}
+
+func TestConcurrentExecution(t *testing.T) {
+	cat, _ := stdCatalog()
+	p, err := Prepare("SELECT _key, UPPER(CAST(cf1['c1'] AS STRING)), COUNT(*) OVER () IS NULL FROM t", nil, cat)
+	require.Error(t, err)
+	p, err = Prepare("SELECT SUBSTR(CAST(_key AS STRING), 1, 1) AS p, COUNT(*), STRING_AGG(CAST(cf1['c1'] AS STRING) ORDER BY _key) "+
+		"FROM t WHERE cf1['c1'] LIKE @pat GROUP BY p", map[string]*btpb.Type{"pat": typString.toProto()}, cat)
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				n := 0
+				err := p.Execute(context.Background(), cat, map[string]*btpb.Value{"pat": {Kind: &btpb.Value_StringValue{StringValue: "%"}}},
+					func([]*btpb.Value) error { n++; return nil })
+				if err != nil || n != 2 {
+					t.Errorf("unexpected result: n=%d err=%v", n, err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}

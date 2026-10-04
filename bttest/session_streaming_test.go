@@ -10,7 +10,9 @@ import (
 	btapb "cloud.google.com/go/bigtable/admin/apiv2/adminpb"
 	btpb "cloud.google.com/go/bigtable/apiv2/bigtablepb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -158,7 +160,15 @@ func TestStreamingSessionHandlers(t *testing.T) {
 		t.Fatalf("unexpected read row: %v", readRow)
 	}
 
-	// 2. Test OpenAuthorizedView
+	// 2. Test OpenAuthorizedView on an existing view covering every row.
+	if _, err := adminClient.CreateAuthorizedView(ctx, &btapb.CreateAuthorizedViewRequest{
+		Parent: tableName, AuthorizedViewId: "av1",
+		AuthorizedView: &btapb.AuthorizedView{AuthorizedView: &btapb.AuthorizedView_SubsetView_{SubsetView: &btapb.AuthorizedView_SubsetView{
+			RowPrefixes: [][]byte{[]byte("")},
+		}}},
+	}); err != nil {
+		t.Fatalf("CreateAuthorizedView failed: %v", err)
+	}
 	avStream, err := dataClient.OpenAuthorizedView(ctx)
 	if err != nil {
 		t.Fatalf("OpenAuthorizedView RPC failed: %v", err)
@@ -199,8 +209,8 @@ func TestStreamingSessionHandlers(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send OpenMaterializedView OpenSession failed: %v", err)
 	}
-	mvResp, err := mvStream.Recv()
-	if err != nil || mvResp.GetOpenSession() == nil {
-		t.Fatalf("recv OpenMaterializedView response failed: %v", err)
+	// Opening a session on a materialized view that does not exist fails.
+	if _, err := mvStream.Recv(); status.Code(err) != codes.NotFound {
+		t.Fatalf("OpenMaterializedView on a missing view: got %v, want NotFound", err)
 	}
 }

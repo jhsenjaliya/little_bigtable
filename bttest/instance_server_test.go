@@ -42,18 +42,7 @@ func newInstanceTestServer(t *testing.T) *server {
 	db.SetMaxOpenConns(1)
 	CreateTables(context.Background(), db)
 
-	return &server{
-		tables:            make(map[string]*table),
-		instances:         make(map[string]*btapb.Instance),
-		clusters:          make(map[string]*btapb.Cluster),
-		appProfiles:       make(map[string]*btapb.AppProfile),
-		materializedViews: make(map[string]*btapb.MaterializedView),
-		db:                db,
-		tableBackend:      NewSqlTables(db),
-		adminBackend:      NewSqlAdminMetadata(db),
-		mvBackend:         NewSqlMaterializedViews(db),
-		cmvs:              newCMVRegistry(),
-	}
+	return newServerState(db)
 }
 
 func TestDeleteInstance(t *testing.T) {

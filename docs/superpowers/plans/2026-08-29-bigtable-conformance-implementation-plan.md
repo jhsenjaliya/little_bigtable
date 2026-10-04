@@ -1,6 +1,6 @@
 # Bigtable Emulator Conformance Implementation Plan
 
-**Status:** In progress — Phase 0 complete and verified; Phase 1 not started
+**Status:** Superseded on 2026-10-04 by [`2026-10-04-bigtable-parity-implementation-plan.md`](2026-10-04-bigtable-parity-implementation-plan.md). Phase 0 was completed and verified; later phases were replaced by the new plan. Kept for history.
 
 **Date:** 2026-08-29
 

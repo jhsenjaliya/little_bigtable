@@ -1,5 +1,11 @@
 # Product Features Added by `jay-bigtable-extended`
 
+> **Current contract:** [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md)
+> (2026-10-04 parity audit) supersedes the status statements below where they
+> differ. This document describes the branch delta as of 2026-08-29; statements
+> made wrong by the v0.5.0 (unreleased) parity iteration are corrected inline
+> and marked "v0.5.0". Test evidence for v0.5.0 is pending.
+
 ## Purpose and comparison scope
 
 This document explains the product behavior and operational improvements that
@@ -27,9 +33,8 @@ For a method-by-method compatibility table, see
 [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md). This document is the
 higher-level product explanation of the branch delta.
 When this document conflicts with older integration notes, prefer current source
-and workflows. Parts of both `Build_and_Integration.md` and
-`LOCALCLOUD_INTEGRATION.md` still describe the retired CGO SQLite driver, older
-Go versions, or a `master`-based/manual-only release process.
+and workflows. `Build_and_Integration.md` still describes a `master`-based
+manual release process; its driver and CGO statements were corrected for v0.5.0.
 
 ## Capability status vocabulary
 
@@ -82,17 +87,17 @@ capacity management, replication, or query engines.
 | Cluster administration | Cluster CRUD and `serve_nodes` updates | Metadata-compatible | Exercise cluster configuration without provisioning capacity. |
 | App profiles | App-profile CRUD with local defaults | Metadata-compatible | Allow standard SDK routing setup to complete. |
 | Persistence | Admin resources and view/backup metadata survive restarts | Functional | Preserve local environment state between emulator runs. |
-| Table safety | Table deletion protection | Functional in-process | Test protected-resource workflows; updates do not survive restart. |
-| IAM | Get, set, and test-permissions methods | Compatibility stub | Prevent local setup from failing on IAM calls. |
-| Authorized views | Persistent CRUD and deletion protection | Metadata-compatible | Exercise configuration code; no read/write access enforcement. |
-| Logical views | Persistent CRUD, query storage, deletion protection | Metadata-compatible | Exercise view lifecycle code; no query execution. |
-| Backups | CRUD, copy, and restore-table operations | Partial emulation | Validate scheduling and admin workflows without copying table data. |
-| Change streams | Persistent mutation log and streaming RPCs | Partial emulation | Test consumers, continuation tokens, and heartbeats within the stated time-bound limits. |
-| Aggregate mutations | `AddToCell` and `MergeToCell` | Partial emulation | Test int64 sum aggregation through production mutation types. |
-| Filters | Interleave deduplication and explicit unsupported errors | Fix | Avoid duplicate cells and silent false-positive test results. |
-| GC | Intersection-rule implementation | Partial emulation | Exercise the rule shape while accounting for its currently over-aggressive deletion semantics. |
+| Table safety | Table deletion protection | Functional | Test protected-resource workflows. v0.5.0: persisted across restart; soft delete with `UndeleteTable`. |
+| IAM | Get, set, and test-permissions methods | Compatibility stub | Prevent local setup from failing on IAM calls. v0.5.0: policies persisted with etags; still not enforced. |
+| Authorized views | Persistent CRUD and deletion protection | Functional (v0.5.0) | v0.5.0: row/family/qualifier subsets enforced on reads and writes. |
+| Logical views | Persistent CRUD, query storage, deletion protection | Partial emulation (v0.5.0) | v0.5.0: query validated and executable through `ExecuteQuery` in the `gsqlready` build. |
+| Backups | CRUD, copy, and restore-table operations | Functional (v0.5.0) | v0.5.0: backups snapshot schema and rows; restore is independent of the live table. |
+| Change streams | Persistent mutation log and streaming RPCs | Partial emulation | Test consumers, continuation tokens, and heartbeats. v0.5.0: opt-in per table, retention, grouped records; single partition. |
+| Aggregate mutations | `AddToCell` and `MergeToCell` | Partial emulation | v0.5.0: typed Sum/Min/Max Int64 families; HLL++ in the `gsqlready` build. |
+| Filters | Explicit unsupported errors | Fix | Avoid silent false-positive test results. v0.5.0: `Interleave` keeps duplicates as in production; `Sink` and `ValueBitmask` implemented. |
+| GC | Intersection-rule implementation | Functional (v0.5.0) | v0.5.0: intersection deletes only when every child rule deletes. |
 | Protocol evolution | Unimplemented-server embedding | Fix | New proto RPCs fail safely with `Unimplemented` instead of panicking. |
-| Liveness RPC | Successful `PingAndWarm` no-op | Compatibility stub | Let clients probe the local endpoint without an unimplemented-method failure. |
+| Liveness RPC | `PingAndWarm` | Compatibility stub | Let clients probe the local endpoint. v0.5.0: validates the instance and app profile. |
 | Conformance baseline | Executable RPC/field ledger, backend-neutral restart contract, and pinned `cbt` smoke | Functional | Make compatibility claims reviewable, detect generated-API drift, and prove core SDK/CLI workflows on both SQL backends. |
 | Container builds | Online and staged Go-dependency, custom-CA, multi-stage Docker build | Functional with image/network caveats | Build in constrained or corporate networks. |
 | Releases | Branch-restricted tagging and binary publication | Functional | Ensure releases are built from the tested extended-branch commit. |
@@ -150,7 +155,9 @@ The branch schema can persist:
 - Backup metadata.
 - Logical views.
 
-IAM policies are intentionally in-memory only.
+v0.5.0: IAM policies, long-running operations, schema bundles, backup
+manifests and idempotency tokens are also persisted; the change log moved to
+`change_stream_t`.
 
 ### User value
 
@@ -227,15 +234,19 @@ Instance creation:
 - Creates any clusters supplied in the create request.
 - Ensures a default app profile exists.
 - Returns an already-completed long-running operation.
+- v0.5.0: requires at least one cluster and a 6–33 character instance ID;
+  display name 4–30 characters; edition defaults to `ENTERPRISE`.
 
 Partial instance updates support:
 
 - `display_name`
-- `type`
+- `type` (v0.5.0: `PRODUCTION` to `DEVELOPMENT` is rejected)
 - `labels`
+- `edition` (v0.5.0)
 
 Deleting an instance removes its local tables and row data, clusters, app
-profiles, and materialized-view registrations. It also removes the persisted
+profiles, and materialized-view registrations. v0.5.0: deletion is refused
+while protected tables, views or backups exist. It also removes the persisted
 instance, cluster, and app-profile metadata.
 
 ### Clusters
@@ -249,7 +260,9 @@ Local cluster behavior includes:
 - A default local location when none is supplied.
 - Immediate `READY` state.
 - Persistent metadata.
-- Partial updates of `serve_nodes`.
+- Partial updates of `serve_nodes` (v0.5.0: also `cluster_config` autoscaling
+  and `node_scaling_factor`; deleting the last cluster, a cluster with backups,
+  or a cluster used by app-profile routing is refused).
 
 `serve_nodes` is metadata only. It does not change emulator capacity or create
 worker nodes.
@@ -260,7 +273,9 @@ The branch implements app-profile create, get, list, update, and delete
 operations. When routing or isolation is omitted, the emulator supplies local
 defaults:
 
-- Single-cluster routing to an available cluster, or `local-cluster`.
+- Single-cluster routing to an available cluster, or `local-cluster`
+  (v0.5.0: routing must reference existing clusters, and data RPCs enforce the
+  profile's routing rules).
 - Transactional writes enabled.
 - Standard isolation with high priority.
 
@@ -295,10 +310,9 @@ to recreate its administrative hierarchy. This is especially useful for:
 
 Deleting a protected table returns `FailedPrecondition`.
 
-Changes made through `UpdateTable` are currently held only in memory because
-the update path does not save the modified table record. A restart can therefore
-reset an updated protection flag; restart persistence is not part of this
-feature's current contract.
+v0.5.0: `UpdateTable` persists the table record, so the protection flag
+survives restart. Deletion is also blocked by authorized-view protection and
+by continuous materialized views that read the table.
 
 ### User value
 
@@ -318,8 +332,9 @@ The branch implements:
 
 Behavior is deliberately permissive:
 
-- `GetIamPolicy` returns a stored in-memory policy or an empty version-1 policy.
-- `SetIamPolicy` stores the supplied policy in memory for the current process.
+- `GetIamPolicy` returns the stored policy or an empty version-1 policy.
+- `SetIamPolicy` stores the supplied policy (v0.5.0: persisted in
+  `iam_policies_t`, etag checked, `update_mask` honored; the resource must exist).
 - `TestIamPermissions` returns every requested permission as granted.
 
 ### User value
@@ -330,7 +345,7 @@ they configure IAM during local development.
 ### Non-goal
 
 There is no authentication or authorization enforcement. Policies do not limit
-data or admin operations and do not survive a process restart.
+data or admin operations.
 
 ## 8. Authorized views
 
@@ -354,9 +369,9 @@ views through the standard Bigtable Admin API.
 
 ### Fidelity limit
 
-Authorized views are metadata-compatible only. Reads and writes are not
-filtered by the view definition, so the emulator must not be used to test data
-access boundaries or security policy enforcement.
+v0.5.0: reads through an authorized view are filtered by its subset
+definition and writes outside it return `PermissionDenied`. IAM is still not
+enforced, so the emulator does not test who may use a view.
 
 ## 9. Logical views
 
@@ -377,8 +392,9 @@ the production API shape.
 
 ### Fidelity limit
 
-The query string is stored but never parsed or executed. This feature validates
-resource lifecycle behavior, not GoogleSQL results.
+v0.5.0: in the `gsqlready` build the query is validated by the GoogleSQL
+engine and the view can be queried with `ExecuteQuery`. In the default build
+the query is stored without validation. Parameterized views are not supported.
 
 ## 10. Backups, backup copies, and table restore
 
@@ -392,22 +408,21 @@ A newly created backup:
 - Requires its referenced source table to exist.
 - Becomes `READY` immediately.
 - Receives local start and end timestamps.
-- Reports a size of zero.
 - Persists its metadata in SQL.
+- v0.5.0: snapshots the table schema and rows, reports `size_bytes`, and
+  validates expiry, backup type and per-table quotas.
 
 `UpdateBackup` currently supports `expire_time`.
 
 ### Copy backup
 
-`CopyBackup` clones backup metadata and records the source-backup relationship.
-It does not copy table data.
+`CopyBackup` records the source-backup relationship. v0.5.0: it copies the
+snapshot data.
 
 ### Restore table
 
-`RestoreTable` creates a new table resource. When the source table still exists,
-the new table receives a copy of the source table's current column-family
-schema and GC rules. No rows are restored. If the source table is unavailable,
-the operation creates an empty table.
+`RestoreTable` creates a new table resource. v0.5.0: schema and rows come from
+the backup snapshot, independent of the live source table.
 
 ### User value
 
@@ -416,9 +431,8 @@ error-handling logic run locally without branching around unsupported RPCs.
 
 ### Fidelity limit
 
-This is not point-in-time backup. The backup does not retain table data or a
-schema snapshot. Restore behavior must not be used to validate disaster
-recovery, retention, storage size, or data integrity.
+v0.5.0: backups are point-in-time snapshots in the local database. They do not
+model production durability, cross-region placement or CMEK.
 
 ## 11. Change streams
 
@@ -457,18 +471,13 @@ connecting to production Bigtable, subject to the limits below.
 
 ### Fidelity limits
 
-- Only one full-table partition is produced.
-- Partition-level filtering and repartitioning are not implemented.
-- If no existing record is at or after a requested start time, the current
-  implementation starts after ID zero and replays historical records instead
-  of waiting at the current tail.
-- End time is checked only after fetched records are emitted. Records are not
-  filtered by commit time, so a past bound or post-bound mutations can still be
-  delivered before the stream sends its OK close record.
-- Change-log rows are not removed when a table or instance is deleted. Reusing
-  the same table name can replay records from the previous table incarnation.
-- The emulator does not reproduce production partition topology, splits, or
+- Only one full-table partition is produced; no split/merge.
+- The emulator does not reproduce production partition topology or
   distributed ordering behavior.
+- v0.5.0 corrected the earlier limits: records are written only when
+  `change_stream_config` is set and expire after the retention period; one
+  record groups a row commit; GC and `DropRowRange` changes are recorded;
+  start/end times and partition ranges are honored.
 
 ## 12. Aggregate mutation support
 
@@ -490,22 +499,18 @@ behavior without receiving an unsupported-mutation response.
 
 ### Fidelity limits
 
-The implementation is intentionally narrow. Only the tested eight-byte int64
-sum behavior should be considered supported. HyperLogLog, min/max, non-int64
-inputs, and other aggregate-cell types have fallback behavior that is not
-production-equivalent and must be treated as unsupported.
+v0.5.0: the family's aggregate `value_type` is persisted and enforced
+(Sum/Min/Max over Int64; HLL++ in the `gsqlready` build, with emulator-specific
+sketch bytes). `AddToCell`/`MergeToCell` on a non-aggregate family return
+`InvalidArgument`.
 
 ## 13. Read-filter correctness improvements
 
 ### Interleave deduplication
 
-On `master`, the interleave implementation could return the same cell multiple
-times when several child filters matched it. The branch merges child results by
-family, qualifier, timestamp, and value and emits one copy of each matching
-cell.
-
-**User impact:** filter tests now match union semantics instead of observing
-artificial duplicate cells.
+v0.5.0: reverted. Production `Interleave` returns a copy of a cell from every
+matching branch, and limit/offset filters count those copies; the emulator now
+does the same.
 
 ### Explicit unsupported-filter errors
 
@@ -518,17 +523,14 @@ false-positive test.
 
 ### Sink filter
 
-The branch recognizes the Sink filter variant so it does not fall into the
-unknown-filter path. The current implementation is best treated as **partial**:
-its source comments describe sink/chain intent, but it does not establish full
-production-equivalent output suppression for every composition. Tests that rely
-on exact Sink semantics should verify their case explicitly.
+v0.5.0: `Sink` sends its input to the final result and nothing to its parent;
+`Sink` inside `Condition` is rejected. `ValueBitmask` is also implemented.
 
 ## 14. Read-modify-write change-log integration
 
 `master` already applies read-modify-write rules to the most recent cell,
 maintains a nondecreasing timestamp, and synchronizes materialized-view shadow
-tables. The extended branch preserves that behavior and adds one runtime
+tables (v0.5.0 replaced shadow tables; see `CMV_SUPPORT.md`). The extended branch preserves that behavior and adds one runtime
 capability: resulting mutations are appended to the new local change log.
 
 The branch also adds regression coverage for the inherited latest-version and
@@ -540,15 +542,9 @@ branch feature.
 
 ## 15. Garbage-collection intersection rules
 
-The branch adds an initial implementation for GC-rule intersections, but its
-current semantics are not production-equivalent. The code intersects the cells
-kept by each child rule. That removes a cell when any child would remove it,
-which is more aggressive than production intersection semantics, where every
-child deletion predicate must match before deletion.
-
-The added regression coverage exercises the current kept-set intersection; it
-does not prove production AND-deletion parity. Treat this feature as **partial
-emulation** and do not use it to validate exact retention behavior.
+v0.5.0: corrected. Intersection deletes a cell only when every child rule
+deletes it; union deletes when any child does; nested rules compose. The
+earlier kept-set regression coverage asserted the old behavior.
 
 ## 16. Forward-compatible gRPC behavior
 
@@ -568,16 +564,15 @@ method and potentially panicking the emulator.
 The emulator is safer to use with newer client libraries, even before every new
 Bigtable API has a local implementation.
 
-This does not mean every generated RPC is supported. Examples still explicitly
-unimplemented include GoogleSQL query execution, snapshot APIs, and hot-tablet
-listing.
+This does not mean every generated RPC is supported. v0.5.0 examples still
+explicitly unimplemented: snapshot APIs, hot-tablet listing and memory layers;
+GoogleSQL returns `Unimplemented` only in builds without `gsqlready`.
 
 ### `PingAndWarm` compatibility
 
 The branch adds an explicit `PingAndWarm` handler that returns an empty
-successful response. It is a liveness compatibility no-op: it confirms the
-local RPC endpoint can answer the method but performs no warming or capacity
-work.
+successful response and performs no warming or capacity work. v0.5.0: it
+validates the instance name and app profile first.
 
 ## 17. Fork module, library configuration, and CLI identity
 
@@ -862,19 +857,20 @@ adding features:
 | Capability | Primary implementation | Primary validation or reference |
 | --- | --- | --- |
 | Storage selection and strict mode | `bttest/dialect.go`, `little_bigtable.go` | `bttest/google_docs_hello_test.go` |
-| PostgreSQL and binary SQL persistence | `bttest/sql_schema.go`, `bttest/sql_rows.go`, `bttest/sql_tables.go` | `BIGTABLE_COMPATIBILITY.md` |
+| PostgreSQL and binary SQL persistence | `bttest/sql_schema.go`, `bttest/storage.go` (v0.5.0; replaced `sql_rows.go`), `bttest/sql_tables.go` | `BIGTABLE_COMPATIBILITY.md` |
 | Backend-neutral restart persistence | `bttest/storage_conformance_test.go` | `TestStorageConformance` on SQLite and PostgreSQL 17; separate CI jobs |
-| Instance, cluster, app-profile admin | `bttest/localcloud_instance_admin.go`, `bttest/instance_server.go` | `bttest/instance_server_test.go`, `bttest/google_docs_hello_test.go` |
+| Instance, cluster, app-profile admin | `bttest/localcloud_instance_admin.go` (v0.5.0; `instance_server.go` removed) | `bttest/instance_server_test.go`, `bttest/google_docs_hello_test.go` |
 | Admin persistence | `bttest/sql_admin_metadata.go`, `bttest/inmem.go` | `TestInstancePersistence` in `bttest/inmem_test.go` |
-| Table deletion protection | `bttest/inmem.go` | Same-process `TestTableDeletionProtection_BlocksDelete`; no restart coverage |
-| IAM stubs | `bttest/instance_server.go` | `TestIAMStubs_Permissive` |
+| Table deletion protection | `bttest/table_admin.go` (v0.5.0) | v0.5.0 evidence pending |
+| IAM stubs | `bttest/sql_iam.go`, `bttest/localcloud_instance_admin.go` (v0.5.0) | v0.5.0 evidence pending |
 | Authorized views | `bttest/localcloud_authorized_views.go` | Authorized-view tests in `bttest/localcloud_new_features_test.go` |
 | Logical views | `bttest/localcloud_logical_views.go` | Logical-view tests in `bttest/localcloud_new_features_test.go` |
 | Backups and restore | `bttest/localcloud_backups.go` | Backup/copy/restore tests in `bttest/localcloud_new_features_test.go` |
-| Change streams | `bttest/localcloud_change_stream.go`, mutation hooks in `bttest/inmem.go` | Implementation inspection; no dedicated behavioral test in the branch |
-| Aggregate mutations | `applyMutations` in `bttest/inmem.go` | Add/Merge tests in `bttest/localcloud_new_features_test.go` |
-| Filter and GC behavior | `filterRow`, `includeCell`, and `applyGC` in `bttest/inmem.go` | Interleave and current GC-behavior regression tests |
+| Change streams | `bttest/localcloud_change_stream.go`, `bttest/data_write.go` (v0.5.0) | v0.5.0 evidence pending |
+| Aggregate mutations | `bttest/mutation_engine.go` (v0.5.0) | Add/Merge tests in `bttest/localcloud_new_features_test.go` |
+| Filter and GC behavior | `bttest/filter.go`; `applyGC` in `bttest/inmem.go` (v0.5.0) | v0.5.0 evidence pending; earlier Interleave/GC tests asserted the old behavior |
 | Liveness and protocol fallback | `bttest/localcloud_change_stream.go`, server embeddings in `bttest/inmem.go` | Implementation inspection |
+| v0.5.0 parity iteration (all areas) | See `BIGTABLE_COMPATIBILITY.md` | Evidence pending |
 | Executable compatibility ledger | `bttest/compatibility.go` | `bttest/compatibility_test.go`; live RPC and protobuf descriptor drift checks |
 | Pinned `cbt` client workflow | `bttest/client_conformance_test.go` | `TestCBTClientConformance`; pinned binary build metadata and subprocess assertions |
 | Fork module and CLI identity | `go.mod`, `little_bigtable.go` | Release workflow build configuration |

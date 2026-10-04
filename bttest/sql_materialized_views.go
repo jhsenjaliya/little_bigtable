@@ -1,11 +1,13 @@
 package bttest
 
 import (
+	"context"
 	"database/sql"
-	"log"
+	"fmt"
 )
 
-// SqlMaterializedViews persists materialized view metadata to materialized_views_t.
+// SqlMaterializedViews persists materialized view definitions to
+// materialized_views_t.
 type SqlMaterializedViews struct {
 	db *sql.DB
 }
@@ -21,53 +23,49 @@ type storedMaterializedView struct {
 	deletionProtection bool
 }
 
-// GetAll returns all persisted materialized views, used to restore state on startup.
-func (m *SqlMaterializedViews) GetAll() []storedMaterializedView {
-	rows, err := m.db.Query("SELECT name, query, deletion_protection FROM materialized_views_t")
-	if err == sql.ErrNoRows {
-		return nil
-	}
+// getAll returns all persisted materialized views, used to restore state on startup.
+func (m *SqlMaterializedViews) getAll(ctx context.Context) ([]storedMaterializedView, error) {
+	rows, err := m.db.QueryContext(ctx, "SELECT name, query, deletion_protection FROM materialized_views_t")
 	if err != nil {
-		log.Fatal(err)
+		return nil, fmt.Errorf("load materialized views: %w", err)
 	}
 	defer rows.Close()
-
 	var result []storedMaterializedView
 	for rows.Next() {
 		var v storedMaterializedView
 		var dp int
 		if err := rows.Scan(&v.name, &v.query, &dp); err != nil {
-			log.Fatal(err)
+			return nil, fmt.Errorf("load materialized views: %w", err)
 		}
 		v.deletionProtection = dp != 0
 		result = append(result, v)
 	}
-	if err := rows.Err(); err != nil {
-		log.Fatal(err)
-	}
-	return result
+	return result, rows.Err()
 }
 
-// Save upserts a materialized view record. Called on CreateMaterializedView and
-// UpdateMaterializedView to keep the persisted state in sync with in-memory state.
-func (m *SqlMaterializedViews) Save(name, query string, deletionProtection bool) {
+func (m *SqlMaterializedViews) save(ctx context.Context, q sqlExecutor, name, query string, deletionProtection bool) error {
+	if q == nil {
+		q = m.db
+	}
 	dp := 0
 	if deletionProtection {
 		dp = 1
 	}
-	_, err := m.db.Exec(
+	_, err := q.ExecContext(ctx,
 		bind("INSERT INTO materialized_views_t (name, query, deletion_protection) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET query = ?, deletion_protection = ?"),
-		name, query, dp, query, dp,
-	)
+		name, query, dp, query, dp)
 	if err != nil {
-		log.Fatalf("saving materialized view %q: %v", name, err)
+		return fmt.Errorf("save materialized view %q: %w", name, err)
 	}
+	return nil
 }
 
-// Delete removes a materialized view record by its full resource name.
-func (m *SqlMaterializedViews) Delete(name string) {
-	_, err := m.db.Exec(bind("DELETE FROM materialized_views_t WHERE name = ?"), name)
-	if err != nil {
-		log.Fatal(err)
+func (m *SqlMaterializedViews) remove(ctx context.Context, q sqlExecutor, name string) error {
+	if q == nil {
+		q = m.db
 	}
+	if _, err := q.ExecContext(ctx, bind("DELETE FROM materialized_views_t WHERE name = ?"), name); err != nil {
+		return fmt.Errorf("delete materialized view %q: %w", name, err)
+	}
+	return nil
 }

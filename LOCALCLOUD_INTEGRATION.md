@@ -3,7 +3,7 @@
 This document covers how to build, release, and integrate the Bigtable emulator
 into Go projects as a library, and Docker image builds for standalone deployment.
 
-All releases are from the `jay-bigtable-extended` branch. Versioning: `v0.0.x`.
+All releases are from the `jay-bigtable-extended` branch. Versioning: semantic `vX.Y.Z` tags.
 
 ## Releasing a New Version
 
@@ -23,7 +23,7 @@ go test ./bttest/ -count=1 -timeout 60s
 go build -o build/little_bigtable .
 ./build/little_bigtable -version
 
-# 4. Tag the release (increment x in v0.0.x).
+# 4. Tag the release (semantic version; examples use v0.0.2).
 git tag -a v0.0.2 -m "v0.0.2 - description of changes"
 
 # 5. Push the tag.
@@ -39,6 +39,7 @@ GOPRIVATE=github.com/jhsenjaliya/* \
 | Version | Changes |
 |---------|---------|
 | `v0.0.1` | Initial extended emulator: PostgreSQL persistence, instance/cluster admin, change streams, IAM stubs, authorized views, backups, logical views, deletion protection, AddToCell/MergeToCell |
+| `v0.5.0` (unreleased) | Parity iteration against `cloud.google.com/go/bigtable` v1.58.0; see [`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md) and [`docs/superpowers/plans/2026-10-04-bigtable-parity-implementation-plan.md`](docs/superpowers/plans/2026-10-04-bigtable-parity-implementation-plan.md). Atomic writes, full filter set, authorized-view/app-profile enforcement, `ReadRows` chunking and stats, `UndeleteTable`, schema bundles, durable LROs, persisted IAM, backup snapshots, opt-in change streams, session protocol, GoogleSQL query/logical views/continuous materialized views (build tag `gsqlready`). One-way storage migration on first start. LocalCloud still pins the pre-iteration commit `9137de7`; update `LITTLE_BIGTABLE_VERSION` after release. Test evidence pending. |
 
 ### Important notes
 
@@ -52,7 +53,9 @@ GOPRIVATE=github.com/jhsenjaliya/* \
 ### Prerequisites
 
 - Go 1.27.0
-- C compiler (`gcc` or `clang`) for SQLite via `go-sqlite3`
+- No C compiler: SQLite uses the pure-Go `github.com/glebarez/go-sqlite`
+  driver (registered as `sqlite3` in `little_bigtable.go`); PostgreSQL uses the
+  pure-Go `github.com/lib/pq`.
 
 ### Build
 
@@ -70,11 +73,14 @@ go build -o little_bigtable .
 ### Static binary (for containers)
 
 ```bash
-CGO_ENABLED=1 go build \
-  -trimpath \
-  -ldflags="-s -w -linkmode external -extldflags -static" \
-  -o little_bigtable .
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o little_bigtable .
 ```
+
+The LocalCloud image build and this repository's `Dockerfile` still use
+`CGO_ENABLED=1` with external static linking; no dependency requires it.
+GoogleSQL features additionally need `-tags gsqlready` and the
+`bttest/internal/gsql` package (finding F-1 in
+[`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md)).
 
 ### Run tests
 
@@ -112,7 +118,7 @@ Remove the `replace` directive before committing.
 
 | Backend | CGO required | C compiler needed | Notes |
 |---------|-------------|-------------------|-------|
-| SQLite | Yes | Yes (`gcc` or `clang`) | `go-sqlite3` is a CGO wrapper |
+| SQLite | No | No | `github.com/glebarez/go-sqlite` is pure Go; register it as `sqlite3` |
 | PostgreSQL | No | No | `lib/pq` is pure Go |
 
 ### Import and start
@@ -125,10 +131,12 @@ import (
     "database/sql"
     "log"
 
+    sqlite "github.com/glebarez/go-sqlite"
     "github.com/jhsenjaliya/little_bigtable/bttest"
-    _ "github.com/mattn/go-sqlite3"
     "google.golang.org/grpc"
 )
+
+func init() { sqlite.RegisterAsSQLITE3() } // register as "sqlite3"
 
 func StartBigtableEmulator(ctx context.Context) (*bttest.Server, error) {
     bttest.ConfigureStorage("sqlite3", true)
@@ -230,8 +238,11 @@ cd /path/to/localcloud
 bash build.sh
 ```
 
-`build.sh` copies source from `../local_cloud_dependencies/bigtable-emulator-extended/`
-into `.build/`, vendors deps, and builds via the localcloud Dockerfile.
+The LocalCloud `Dockerfile` stage `bigtable-build` fetches
+`github.com/jhsenjaliya/little_bigtable@${LITTLE_BIGTABLE_VERSION}` and builds it;
+`build.sh` accepts `LITTLE_BIGTABLE_VERSION` to override the default revision
+set in that `Dockerfile`. Publish (push) the revision before building
+LocalCloud against it.
 
 ## Feature Coverage
 

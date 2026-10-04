@@ -224,8 +224,8 @@ func cleanupStorageConformanceData(t *testing.T, backend storageConformanceBacke
 		placeholder = func(position int) string { return "$" + strconv.Itoa(position) }
 	}
 	tableName := parent + "/tables/" + tableID
-	if _, err := db.Exec("DELETE FROM change_log_t WHERE table_name = "+placeholder(1), tableName); err != nil {
-		t.Errorf("clean change_log_t storage conformance data: %v", err)
+	if _, err := db.Exec("DELETE FROM change_stream_t WHERE table_name = "+placeholder(1), tableName); err != nil {
+		t.Errorf("clean change_stream_t storage conformance data: %v", err)
 	}
 	for _, table := range []string{"rows_t", "tables_t"} {
 		query := fmt.Sprintf("DELETE FROM %s WHERE parent = %s AND table_id = %s", table, placeholder(1), placeholder(2))

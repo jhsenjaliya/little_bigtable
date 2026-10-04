@@ -1060,11 +1060,24 @@ func TestGoogleDocs_SampleRowKeys(t *testing.T) {
 		require.NoError(t, tbl.Apply(env.ctx, fmt.Sprintf("row#%04d", i), mut))
 	}
 
-	// Google Docs: SampleRowKeys for parallel scans
+	// Google Docs: SampleRowKeys for parallel scans. A small single-tablet
+	// table returns only the end-of-table sentinel, which the client drops.
 	keys, err := tbl.SampleRowKeys(env.ctx)
 	require.NoError(t, err)
-	// Emulator should return at least some sample keys (implementation varies)
-	assert.NotNil(t, keys)
+	assert.True(t, sort.StringsAreSorted(keys), "sample keys must be sorted: %v", keys)
+
+	// Pre-split tables report their split points as sample boundaries.
+	require.NoError(t, env.admin.CreatePresplitTable(env.ctx, "sample-presplit", []string{"g", "p"}))
+	require.NoError(t, env.admin.CreateColumnFamily(env.ctx, "sample-presplit", "cf"))
+	presplit := env.client.Open("sample-presplit")
+	for _, k := range []string{"a", "h", "q"} {
+		mut := bigtable.NewMutation()
+		mut.Set("cf", "v", bigtable.Now(), []byte("x"))
+		require.NoError(t, presplit.Apply(env.ctx, k, mut))
+	}
+	keys, err = presplit.SampleRowKeys(env.ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"g", "p"}, keys)
 }
 
 // --------------------------------------------------------------------------

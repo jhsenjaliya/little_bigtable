@@ -14,4 +14,18 @@ docker-build:
 docker-build-offline:
 	$(MAKE) -f Makefile.localcloud docker-build GO_OFFLINE=true
 
-.PHONY: docker-build docker-build-offline
+# Multi-platform image. Without PUSH=true the result is written to an OCI
+# archive (OCI_OUTPUT), because a multi-platform image cannot be loaded into
+# the classic local image store.
+PLATFORMS ?= linux/amd64,linux/arm64
+PUSH ?= false
+OCI_OUTPUT ?= dist/bigtable-emulator-extended-oci.tar
+docker-buildx:
+	docker buildx build \
+		--platform $(PLATFORMS) \
+		--build-arg GO_OFFLINE=$(GO_OFFLINE) \
+		--build-arg GO_OFFLINE_DEPS_DIR=$(GO_OFFLINE_DEPS_DIR) \
+		-t $(IMAGE) \
+		$(if $(filter true,$(PUSH)),--push,--output type=oci,dest=$(OCI_OUTPUT)) .
+
+.PHONY: docker-build docker-build-offline docker-buildx

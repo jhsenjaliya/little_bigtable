@@ -74,17 +74,7 @@ func newTestServer(t *testing.T) *server {
 	db.SetMaxOpenConns(1)
 	CreateTables(context.Background(), db)
 
-	s := &server{
-		tables:       make(map[string]*table),
-		instances:    make(map[string]*btapb.Instance),
-		clusters:     make(map[string]*btapb.Cluster),
-		appProfiles:  make(map[string]*btapb.AppProfile),
-		db:           db,
-		tableBackend: NewSqlTables(db),
-		adminBackend: NewSqlAdminMetadata(db),
-		mvBackend:    NewSqlMaterializedViews(db),
-		cmvs:         newCMVRegistry(),
-	}
+	s := newServerState(db)
 	return s
 }
 
@@ -238,7 +228,7 @@ func TestConcurrentMutations(t *testing.T) {
 					RowKey:    rowKey,
 					Mutations: ms(i),
 				}
-				if _, err := s.MutateRow(ctx, req); err != nil {
+				if _, err := s.MutateRow(ctx, req); err != nil && ctx.Err() == nil {
 					panic(err) // can't use t.Fatal in goroutine
 				}
 			}
@@ -274,10 +264,10 @@ func TestConcurrentMutations(t *testing.T) {
 		gotChunks = append(gotChunks, res.Chunks...)
 	}
 	var seen []string
+	if len(gotChunks) > 0 && !bytes.Equal(gotChunks[0].RowKey, rowKey) {
+		t.Fatalf("expected row %q got %q", rowKey, gotChunks[0].RowKey)
+	}
 	for i, c := range gotChunks {
-		if !bytes.Equal(c.RowKey, rowKey) {
-			t.Fatalf("expected row %q got %q", c.RowKey, rowKey)
-		}
 		if !bytes.Equal(c.Qualifier.Value, c.Value) {
 			t.Fatalf("[%d] expected equal got %q %q", i, c.Qualifier.Value, c.Value)
 		}
@@ -325,8 +315,12 @@ func TestCreateTableResponse(t *testing.T) {
 				RetentionPeriod: durationpb.New(72 * time.Hour),
 			},
 		},
+		EffectiveAutomatedBackupPolicy: &btapb.Table_AutomatedBackupPolicy{
+			Frequency:       durationpb.New(24 * time.Hour),
+			RetentionPeriod: durationpb.New(72 * time.Hour),
+		},
 	}
-	require.Equal(t, want, got)
+	require.True(t, proto.Equal(want, got), "got %v, want %v", got, want)
 }
 
 func TestCreateTableWithFamily(t *testing.T) {
@@ -465,11 +459,23 @@ func TestSampleRowKeys(t *testing.T) {
 	if len(mock.responses) == 0 {
 		t.Fatal("Response count: got 0, want > 0")
 	}
-	// Make sure the offset of the final response is the offset of the final row
-	got := mock.responses[len(mock.responses)-1].OffsetBytes
-	want := int64((rowCount - 1) * len(val))
-	if got != want {
-		t.Errorf("Invalid offset: got %d, want %d", got, want)
+	// The final sample is the empty end-of-table key whose offset covers
+	// every row; offsets never decrease and keys are strictly ascending.
+	last := mock.responses[len(mock.responses)-1]
+	if len(last.RowKey) != 0 {
+		t.Errorf("final sample key = %q, want the empty end-of-table key", last.RowKey)
+	}
+	if want := int64(rowCount * (len("row-0000") + len("col") + len(val))); last.OffsetBytes < int64(rowCount*len(val)) || last.OffsetBytes > want {
+		t.Errorf("final offset = %d, want between %d and %d", last.OffsetBytes, rowCount*len(val), want)
+	}
+	for i := 1; i < len(mock.responses); i++ {
+		prev, cur := mock.responses[i-1], mock.responses[i]
+		if cur.OffsetBytes < prev.OffsetBytes {
+			t.Errorf("offsets decrease at sample %d", i)
+		}
+		if len(cur.RowKey) > 0 && string(cur.RowKey) <= string(prev.RowKey) {
+			t.Errorf("sample keys not ascending at %d: %q after %q", i, cur.RowKey, prev.RowKey)
+		}
 	}
 }
 
@@ -614,12 +620,20 @@ func TestModifyColumnFamilies(t *testing.T) {
 		cols := map[string]bool{}
 		fams := map[string]bool{}
 		chunks := 0
+		family, qualifier := "", ""
 		for _, r := range mock.responses {
 			for _, c := range r.Chunks {
 				chunks++
-				colName := c.FamilyName.Value + "." + string(c.Qualifier.Value)
+				// Family and qualifier are sent only when they change.
+				if c.FamilyName != nil {
+					family = c.FamilyName.Value
+				}
+				if c.Qualifier != nil {
+					qualifier = string(c.Qualifier.Value)
+				}
+				colName := family + "." + qualifier
 				cols[colName] = true
-				fams[c.FamilyName.Value] = true
+				fams[family] = true
 			}
 		}
 		if got, want := len(fams), expectFams; got != want {
@@ -705,7 +719,7 @@ func TestDropRowRange(t *testing.T) {
 	}
 
 	doWrite()
-	tblSize := tbl.rows.Len()
+	tblSize := rowCount(t, tbl)
 	req := &btapb.DropRowRangeRequest{
 		Name:   tblInfo.Name,
 		Target: &btapb.DropRowRangeRequest_RowKeyPrefix{RowKeyPrefix: []byte("AAA")},
@@ -713,7 +727,7 @@ func TestDropRowRange(t *testing.T) {
 	if _, err = s.DropRowRange(ctx, req); err != nil {
 		t.Fatalf("Dropping first range: %v", err)
 	}
-	got, want := tbl.rows.Len(), tblSize-count
+	got, want := rowCount(t, tbl), tblSize-count
 	if got != want {
 		t.Errorf("Row count after first drop: got %d (%v), want %d", got, tbl.rows, want)
 	}
@@ -725,7 +739,7 @@ func TestDropRowRange(t *testing.T) {
 	if _, err = s.DropRowRange(ctx, req); err != nil {
 		t.Fatalf("Dropping second range: %v", err)
 	}
-	got, want = tbl.rows.Len(), tblSize-(2*count)
+	got, want = rowCount(t, tbl), tblSize-(2*count)
 	if got != want {
 		t.Errorf("Row count after second drop: got %d (%v), want %d", got, tbl.rows, want)
 	}
@@ -737,7 +751,7 @@ func TestDropRowRange(t *testing.T) {
 	if _, err = s.DropRowRange(ctx, req); err != nil {
 		t.Fatalf("Dropping invalid range: %v", err)
 	}
-	got, want = tbl.rows.Len(), tblSize-(2*count)
+	got, want = rowCount(t, tbl), tblSize-(2*count)
 	if got != want {
 		t.Errorf("Row count after invalid drop: got %d (%v), want %d", got, tbl.rows, want)
 	}
@@ -749,7 +763,7 @@ func TestDropRowRange(t *testing.T) {
 	if _, err = s.DropRowRange(ctx, req); err != nil {
 		t.Fatalf("Dropping all data: %v", err)
 	}
-	got, want = tbl.rows.Len(), 0
+	got, want = rowCount(t, tbl), 0
 	if got != want {
 		t.Errorf("Row count after drop all: got %d, want %d", got, want)
 	}
@@ -765,13 +779,13 @@ func TestDropRowRange(t *testing.T) {
 	if _, err = s.DropRowRange(ctx, req); err != nil {
 		t.Fatalf("Dropping all data: %v", err)
 	}
-	got, want = tbl.rows.Len(), 0
+	got, want = rowCount(t, tbl), 0
 	if got != want {
 		t.Errorf("Row count after drop all: got %d, want %d", got, want)
 	}
 
 	doWrite()
-	got, want = tbl.rows.Len(), len(prefixes)
+	got, want = rowCount(t, tbl), len(prefixes)
 	if got != want {
 		t.Errorf("Row count after rewrite: got %d, want %d", got, want)
 	}
@@ -784,7 +798,7 @@ func TestDropRowRange(t *testing.T) {
 		t.Fatalf("Dropping range: %v", err)
 	}
 	doWrite()
-	got, want = tbl.rows.Len(), len(prefixes)
+	got, want = rowCount(t, tbl), len(prefixes)
 	if got != want {
 		t.Errorf("Row count after drop range: got %d, want %d", got, want)
 	}
@@ -793,10 +807,37 @@ func TestDropRowRange(t *testing.T) {
 type MockReadRowsServer struct {
 	responses []*btpb.ReadRowsResponse
 	grpc.ServerStream
+
+	// Sticky chunk fields, filled into later chunks so tests can inspect each
+	// chunk on its own. raw keeps the responses exactly as sent.
+	raw             []*btpb.ReadRowsResponse
+	curKey          []byte
+	curFam, curQual bool
+	famName         string
+	qualName        []byte
 }
 
 func (s *MockReadRowsServer) Send(resp *btpb.ReadRowsResponse) error {
-	s.responses = append(s.responses, resp)
+	s.raw = append(s.raw, resp)
+	filled := proto.Clone(resp).(*btpb.ReadRowsResponse)
+	for _, c := range filled.Chunks {
+		if c.RowKey != nil {
+			s.curKey = c.RowKey
+		} else {
+			c.RowKey = s.curKey
+		}
+		if c.FamilyName != nil {
+			s.famName = c.FamilyName.Value
+		} else {
+			c.FamilyName = &wrappers.StringValue{Value: s.famName}
+		}
+		if c.Qualifier != nil {
+			s.qualName = c.Qualifier.Value
+		} else {
+			c.Qualifier = &wrappers.BytesValue{Value: s.qualName}
+		}
+	}
+	s.responses = append(s.responses, filled)
 	return nil
 }
 
@@ -1089,10 +1130,10 @@ func TestReadRowsOrder(t *testing.T) {
 	// Interleave returns the union of cells matching either sub-filter.
 	// cf1 family match: 9 cells (3 cols × 3 versions)
 	// col2 qualifier match outside cf1: cf0/col2 (1 cell, GC'd) + cf2/col2 (3 cells) = 4
-	// cf1/col2 cells appear in both sub-filters but are deduplicated.
-	// Total: 9 + 4 = 13
-	if len(mock.responses[0].Chunks) != 13 {
-		t.Fatalf("Chunk count: got %d, want 13", len(mock.responses[0].Chunks))
+	// cf1/col2 cells match both sub-filters, and Bigtable keeps both copies.
+	// Total: 9 + 3 duplicates + 4 = 16
+	if len(mock.responses[0].Chunks) != 16 {
+		t.Fatalf("Chunk count: got %d, want 16", len(mock.responses[0].Chunks))
 	}
 	testOrder(mock)
 
@@ -1692,7 +1733,7 @@ func TestServer_ReadModifyWriteRow(t *testing.T) {
 func populateTable(ctx context.Context, s *server) (*btapb.Table, error) {
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
-			"cf0": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{1}}},
+			"cf0": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 1}}},
 		},
 	}
 	tblInfo, err := s.CreateTable(ctx, &btapb.CreateTableRequest{Parent: "cluster", TableId: "t", Table: &newTbl})
@@ -1705,7 +1746,7 @@ func populateTable(ctx context.Context, s *server) (*btapb.Table, error) {
 			Name: tblInfo.Name,
 			Modifications: []*btapb.ModifyColumnFamiliesRequest_Modification{{
 				Id:  "cf" + strconv.Itoa(i),
-				Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{&btapb.ColumnFamily{}},
+				Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{Create: &btapb.ColumnFamily{}},
 			}},
 		}
 	}
@@ -1723,7 +1764,7 @@ func populateTable(ctx context.Context, s *server) (*btapb.Table, error) {
 					TableName: tblInfo.Name,
 					RowKey:    []byte("row"),
 					Mutations: []*btpb.Mutation{{
-						Mutation: &btpb.Mutation_SetCell_{&btpb.Mutation_SetCell{
+						Mutation: &btpb.Mutation_SetCell_{SetCell: &btpb.Mutation_SetCell{
 							FamilyName:      "cf" + strconv.Itoa(fc),
 							ColumnQualifier: []byte("col" + strconv.Itoa(cc)),
 							TimestampMicros: int64((tc + 1) * 1000),
@@ -1747,10 +1788,10 @@ func TestFilters(t *testing.T) {
 		code codes.Code
 		out  int
 	}{
-		{in: &btpb.RowFilter{Filter: &btpb.RowFilter_BlockAllFilter{true}}, out: 0},
-		{in: &btpb.RowFilter{Filter: &btpb.RowFilter_BlockAllFilter{false}}, code: codes.InvalidArgument},
-		{in: &btpb.RowFilter{Filter: &btpb.RowFilter_PassAllFilter{true}}, out: 1},
-		{in: &btpb.RowFilter{Filter: &btpb.RowFilter_PassAllFilter{false}}, code: codes.InvalidArgument},
+		{in: &btpb.RowFilter{Filter: &btpb.RowFilter_BlockAllFilter{BlockAllFilter: true}}, out: 0},
+		{in: &btpb.RowFilter{Filter: &btpb.RowFilter_BlockAllFilter{BlockAllFilter: false}}, code: codes.InvalidArgument},
+		{in: &btpb.RowFilter{Filter: &btpb.RowFilter_PassAllFilter{PassAllFilter: true}}, out: 1},
+		{in: &btpb.RowFilter{Filter: &btpb.RowFilter_PassAllFilter{PassAllFilter: false}}, code: codes.InvalidArgument},
 	}
 
 	ctx := context.Background()
@@ -1905,30 +1946,30 @@ func TestFilterRow(t *testing.T) {
 		want   bool
 	}{
 		// The regexp-based filters perform whole-string, case-sensitive matches.
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowKeyRegexFilter{[]byte("row")}}, true},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowKeyRegexFilter{[]byte("ro")}}, false},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowKeyRegexFilter{[]byte("ROW")}}, false},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowKeyRegexFilter{[]byte("moo")}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowKeyRegexFilter{RowKeyRegexFilter: []byte("row")}}, true},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowKeyRegexFilter{RowKeyRegexFilter: []byte("ro")}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowKeyRegexFilter{RowKeyRegexFilter: []byte("ROW")}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowKeyRegexFilter{RowKeyRegexFilter: []byte("moo")}}, false},
 
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{"fam"}}, true},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{"f.*"}}, true},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{"[fam]+"}}, true},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{"fa"}}, false},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{"FAM"}}, false},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{"moo"}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{FamilyNameRegexFilter: "fam"}}, true},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{FamilyNameRegexFilter: "f.*"}}, true},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{FamilyNameRegexFilter: "[fam]+"}}, true},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{FamilyNameRegexFilter: "fa"}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{FamilyNameRegexFilter: "FAM"}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{FamilyNameRegexFilter: "moo"}}, false},
 
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{[]byte("col")}}, true},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{[]byte("co")}}, false},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{[]byte("COL")}}, false},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{[]byte("moo")}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{ColumnQualifierRegexFilter: []byte("col")}}, true},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{ColumnQualifierRegexFilter: []byte("co")}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{ColumnQualifierRegexFilter: []byte("COL")}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{ColumnQualifierRegexFilter: []byte("moo")}}, false},
 
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{[]byte("val")}}, true},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{[]byte("va")}}, false},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{[]byte("VAL")}}, false},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{[]byte("moo")}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{ValueRegexFilter: []byte("val")}}, true},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{ValueRegexFilter: []byte("va")}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{ValueRegexFilter: []byte("VAL")}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{ValueRegexFilter: []byte("moo")}}, false},
 
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_TimestampRangeFilter{&btpb.TimestampRange{StartTimestampMicros: int64(0), EndTimestampMicros: int64(1000)}}}, false},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_TimestampRangeFilter{&btpb.TimestampRange{StartTimestampMicros: int64(1000), EndTimestampMicros: int64(2000)}}}, true},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_TimestampRangeFilter{TimestampRangeFilter: &btpb.TimestampRange{StartTimestampMicros: int64(0), EndTimestampMicros: int64(1000)}}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_TimestampRangeFilter{TimestampRangeFilter: &btpb.TimestampRange{StartTimestampMicros: int64(1000), EndTimestampMicros: int64(2000)}}}, true},
 	} {
 		got, err := filterRow(test.filter, row.copy())
 		if err != nil {
@@ -1955,27 +1996,27 @@ func TestFilterRowWithErrors(t *testing.T) {
 	for _, test := range []struct {
 		badRegex *btpb.RowFilter
 	}{
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowKeyRegexFilter{[]byte("[")}}},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{"["}}},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{[]byte("[")}}},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{[]byte("[")}}},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowKeyRegexFilter{RowKeyRegexFilter: []byte("[")}}},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_FamilyNameRegexFilter{FamilyNameRegexFilter: "["}}},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{ColumnQualifierRegexFilter: []byte("[")}}},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{ValueRegexFilter: []byte("[")}}},
 		{&btpb.RowFilter{Filter: &btpb.RowFilter_Chain_{
 			Chain: &btpb.RowFilter_Chain{
 				Filters: []*btpb.RowFilter{
-					{Filter: &btpb.RowFilter_ValueRegexFilter{[]byte("[")}},
+					{Filter: &btpb.RowFilter_ValueRegexFilter{ValueRegexFilter: []byte("[")}},
 				},
 			},
 		}}},
 		{&btpb.RowFilter{Filter: &btpb.RowFilter_Condition_{
 			Condition: &btpb.RowFilter_Condition{
-				PredicateFilter: &btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{[]byte("[")}},
+				PredicateFilter: &btpb.RowFilter{Filter: &btpb.RowFilter_ValueRegexFilter{ValueRegexFilter: []byte("[")}},
 			},
 		}}},
 
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowSampleFilter{0.0}}},                                                                                        // 0.0 is invalid.
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowSampleFilter{1.0}}},                                                                                        // 1.0 is invalid.
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_TimestampRangeFilter{&btpb.TimestampRange{StartTimestampMicros: int64(1), EndTimestampMicros: int64(1000)}}}}, // Server only supports millisecond precision.
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_TimestampRangeFilter{&btpb.TimestampRange{StartTimestampMicros: int64(1000), EndTimestampMicros: int64(1)}}}}, // Server only supports millisecond precision.
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowSampleFilter{RowSampleFilter: 0.0}}},                                                                                             // 0.0 is invalid.
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_RowSampleFilter{RowSampleFilter: 1.0}}},                                                                                             // 1.0 is invalid.
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_TimestampRangeFilter{TimestampRangeFilter: &btpb.TimestampRange{StartTimestampMicros: int64(1), EndTimestampMicros: int64(1000)}}}}, // Server only supports millisecond precision.
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_TimestampRangeFilter{TimestampRangeFilter: &btpb.TimestampRange{StartTimestampMicros: int64(1000), EndTimestampMicros: int64(1)}}}}, // Server only supports millisecond precision.
 	} {
 		got, err := filterRow(test.badRegex, row.copy())
 		if got != false {
@@ -1999,7 +2040,10 @@ func TestFilterRowWithRowSampleFilter(t *testing.T) {
 		{0.5, false}, // Equal to random float. Return no rows.
 		{0.9, true},  // Greater than random float. Return all rows.
 	} {
-		got, err := filterRow(&btpb.RowFilter{Filter: &btpb.RowFilter_RowSampleFilter{test.p}}, &row{})
+		r := newRow("r")
+		r.getOrCreateFamily("f", 0).Cells["c"] = []cell{{Ts: 1000, Value: []byte("v")}}
+		r.families["f"].ColNames = []string{"c"}
+		got, err := filterRow(&btpb.RowFilter{Filter: &btpb.RowFilter_RowSampleFilter{RowSampleFilter: test.p}}, r)
 		if err != nil {
 			t.Fatalf("%f: %v", test.p, err)
 		}
@@ -2033,7 +2077,7 @@ func TestFilterRowWithBinaryColumnQualifier(t *testing.T) {
 		{`[\x7f\x80]{2}`, true}, // succeeds: exactly two of either 127 or 128
 		{`\C{2}`, true},         // succeeds: two bytes
 	} {
-		got, _ := filterRow(&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{[]byte(test.filter)}}, row.copy())
+		got, _ := filterRow(&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{ColumnQualifierRegexFilter: []byte(test.filter)}}, row.copy())
 		if got != test.want {
 			t.Errorf("%v: got %t, want %t", test.filter, got, test.want)
 		}
@@ -2072,7 +2116,7 @@ func TestFilterRowWithUnicodeColumnQualifier(t *testing.T) {
 		{`a\C{2}b`, true},    // succeeds: § is two bytes
 		{`\C{4}`, true},      // succeeds: four bytes
 	} {
-		got, _ := filterRow(&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{[]byte(test.filter)}}, row.copy())
+		got, _ := filterRow(&btpb.RowFilter{Filter: &btpb.RowFilter_ColumnQualifierRegexFilter{ColumnQualifierRegexFilter: []byte(test.filter)}}, row.copy())
 		if got != test.want {
 			t.Errorf("%v: got %t, want %t", test.filter, got, test.want)
 		}
@@ -2356,10 +2400,10 @@ func TestFilterRowCellsPerRowLimitFilterTruthiness(t *testing.T) {
 		want   bool
 	}{
 		// The regexp-based filters perform whole-string, case-sensitive matches.
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_CellsPerRowOffsetFilter{1}}, true},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_CellsPerRowOffsetFilter{2}}, true},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_CellsPerRowOffsetFilter{3}}, false},
-		{&btpb.RowFilter{Filter: &btpb.RowFilter_CellsPerRowOffsetFilter{4}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_CellsPerRowOffsetFilter{CellsPerRowOffsetFilter: 1}}, true},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_CellsPerRowOffsetFilter{CellsPerRowOffsetFilter: 2}}, true},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_CellsPerRowOffsetFilter{CellsPerRowOffsetFilter: 3}}, false},
+		{&btpb.RowFilter{Filter: &btpb.RowFilter_CellsPerRowOffsetFilter{CellsPerRowOffsetFilter: 4}}, false},
 	} {
 		got, err := filterRow(test.filter, row.copy())
 		if err != nil {
@@ -2383,21 +2427,12 @@ func TestInstancePersistence(t *testing.T) {
 	db1.SetMaxOpenConns(1)
 	CreateTables(ctx, db1)
 
-	srv1 := &server{
-		tables:       make(map[string]*table),
-		instances:    make(map[string]*btapb.Instance),
-		clusters:     make(map[string]*btapb.Cluster),
-		appProfiles:  make(map[string]*btapb.AppProfile),
-		db:           db1,
-		tableBackend: NewSqlTables(db1),
-		adminBackend: NewSqlAdminMetadata(db1),
-		mvBackend:    NewSqlMaterializedViews(db1),
-		cmvs:         newCMVRegistry(),
-	}
+	srv1 := newServerState(db1)
 
 	_, err = srv1.CreateInstance(ctx, &btapb.CreateInstanceRequest{
 		Parent:     "projects/test-proj",
 		InstanceId: "persist-instance",
+		Clusters:   map[string]*btapb.Cluster{"local-cluster": {ServeNodes: 1}},
 		Instance: &btapb.Instance{
 			DisplayName: "Persisted Instance",
 			Type:        btapb.Instance_DEVELOPMENT,
@@ -2416,17 +2451,7 @@ func TestInstancePersistence(t *testing.T) {
 	defer db2.Close()
 	db2.SetMaxOpenConns(1)
 
-	srv2 := &server{
-		tables:       make(map[string]*table),
-		instances:    make(map[string]*btapb.Instance),
-		clusters:     make(map[string]*btapb.Cluster),
-		appProfiles:  make(map[string]*btapb.AppProfile),
-		db:           db2,
-		tableBackend: NewSqlTables(db2),
-		adminBackend: NewSqlAdminMetadata(db2),
-		mvBackend:    NewSqlMaterializedViews(db2),
-		cmvs:         newCMVRegistry(),
-	}
+	srv2 := newServerState(db2)
 	srv2.LoadAdminMetadata()
 
 	name := "projects/test-proj/instances/persist-instance"

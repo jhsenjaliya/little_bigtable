@@ -27,7 +27,7 @@ func init() {
 
 const (
 	maxMsgSize = 256 * 1024 * 1024 // 256 MiB
-	version    = "0.3.0-localcloud"
+	version    = "0.5.0-localcloud"
 )
 
 func main() {

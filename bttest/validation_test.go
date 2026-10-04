@@ -110,9 +110,9 @@ func TestMessageOnInvalidKeyRange(t *testing.T) {
 func TestValidateReadRowsRequestSendsRPCError(t *testing.T) {
 	tableName := "foo.org/bar"
 	// Minimal server to reproduce failures.
-	srv := &server{
-		tables: map[string]*table{tableName: new(table)},
-	}
+	srv := newTestServer(t)
+	srv.tables[tableName] = &table{parent: "foo.org", tableId: "bar", storageId: "bar",
+		families: map[string]*columnFamily{}, rows: NewSqlRows(srv.db, "foo.org", "bar")}
 
 	badValues := []struct {
 		startKeyClosed, startKeyOpen, endKeyClosed, endKeyOpen string
@@ -164,7 +164,7 @@ func TestValidateReadRowsRequestSendsRPCError(t *testing.T) {
 			},
 		}
 
-		err := srv.ReadRows(badReq, nil)
+		err := srv.ReadRows(badReq, &MockReadRowsServer{})
 		if err == nil {
 			t.Errorf("#%d: unexpectedly returned nil error", i)
 			continue

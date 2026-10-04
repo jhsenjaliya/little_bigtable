@@ -1,116 +1,129 @@
-# CMV (Continuous Materialized View) Support for little_bigtable
+# Continuous Materialized View (CMV) Support
+
+Status as of the 2026-10-04 parity audit ([`BIGTABLE_COMPATIBILITY.md`](BIGTABLE_COMPATIBILITY.md),
+capabilities BT-CMV-1 and BT-CMV-2). Verification: pending test evidence.
+
+> **Build requirement.** CMVs are implemented on the GoogleSQL engine in
+> `bttest/internal/gsql`, compiled only with `-tags gsqlready`
+> (`bttest/materialized_views.go`). In the default build
+> (`bttest/gsql_stub.go`) every materialized-view RPC returns `Unimplemented`
+> ("GoogleSQL is not available in this build"). See audit finding F-1.
 
 ## Overview
 
-Bigtable CMVs allow you to re-key table data for efficient queries on alternate key orderings.
-Production Bigtable handles CMV maintenance automatically. This emulator replicates that
-behavior via the standard `CreateMaterializedView` gRPC method.
+A continuous materialized view is a read-only, pre-computed result of a
+GoogleSQL query over one source table. Production Bigtable maintains it
+asynchronously. The emulator defines views through the standard
+`CreateMaterializedView` Admin RPC and serves them through the same read paths
+as production.
 
-## How It Works
+Owner: `bttest/materialized_views.go` (definition, storage, recomputation,
+CRUD), `bttest/sql_materialized_views.go` (persisted definitions in
+`materialized_views_t`), `bttest/targets.go` and `bttest/session_streaming.go`
+(read targets).
 
-### 1. Creating a CMV
-
-Use the standard Go admin client, pointed at the emulator:
+## Creating a view
 
 ```go
 iac, err := bigtable.NewInstanceAdminClient(ctx, project)
 err = iac.CreateMaterializedView(ctx, instanceID, &bigtable.MaterializedViewInfo{
-    MaterializedViewID: "events_by_account",
-    Query: `SELECT
-  SPLIT(_key, '#')[SAFE_OFFSET(3)] AS region,
-  SPLIT(_key, '#')[SAFE_OFFSET(4)] AS account_id,
-  SPLIT(_key, '#')[SAFE_OFFSET(1)] AS ts,
-  SPLIT(_key, '#')[SAFE_OFFSET(2)] AS typ,
-  SPLIT(_key, '#')[SAFE_OFFSET(0)] AS item_id,
-  _key AS src_key,
-  cf1 AS cf1
-FROM ` + "`events`" + `
-ORDER BY region, account_id, ts, typ, item_id, src_key`,
+    MaterializedViewID: "clicks_by_account",
+    Query: "SELECT SPLIT(_key, '#')[SAFE_OFFSET(1)] AS account, " +
+        "COUNT(*) AS clicks " +
+        "FROM `events` " +
+        "GROUP BY account",
 })
 ```
 
-The emulator parses the SQL to extract the key transformation config. The same code works
-against both production Bigtable and the emulator.
+The query is parsed, type-checked against the source table and prepared by the
+GoogleSQL engine (`gsql.PrepareMaterializedView`). An invalid query fails the
+create call.
 
-### 2. Write-time Sync
+### Query rules (upstream)
 
-When data is written to a source table (via MutateRow, MutateRows, CheckAndMutateRow,
-or ReadModifyWriteRow), the emulator automatically:
+From "Continuous materialized view queries" (docs fetched 2026-10-04):
 
-1. Detects if the target table has any registered CMVs
-2. Creates the CMV shadow table (if it doesn't exist yet) with matching column families
-3. Transforms the source row key per the SQL's `ORDER BY`
-4. Writes the re-keyed row to the shadow table
+- The statement is a `SELECT` with either a `GROUP BY` clause (aggregation) or,
+  for an asynchronous secondary index, an `ORDER BY` clause — not both.
+- With `GROUP BY`, every unaggregated output column must be grouped; aggregated
+  columns use supported aggregation functions.
+- With `ORDER BY`, the ordered columns become the row key, in clause order.
+- Optional `_key` column: must be `BYTES`; the query must group by `_key` and
+  nothing else except, optionally, `_timestamp`.
+- Optional `_timestamp` column of type `TIMESTAMP` sets the cell timestamp.
+- `LIMIT`/`OFFSET` and nested `GROUP BY`/`ORDER BY` are not allowed.
 
-### 3. Delete Propagation
+Which of these rules the emulator's engine rejects at create time is
+**pending test evidence**.
 
-When source rows are deleted (DeleteFromRow mutation, DropRowRange), the emulator
-derives the CMV key and deletes the corresponding CMV row.
+## Storage layout
 
-### 4. Reading from the CMV
+| Aspect | Emulator behavior |
+| --- | --- |
+| Storage location | Hidden storage ID `__mv__/<view id>` in `rows_t`; not visible as a table |
+| Row key, `_key` only | The `_key` bytes are used directly |
+| Row key, other key columns | `GROUP BY`/`ORDER BY` key columns encoded as an OrderedCodeBytes struct key (`gsql.EncodeKey`). **Emulator choice:** production does not document its multi-column key encoding, so do not depend on these bytes matching production. |
+| Value columns | Family `default`; qualifier = column alias |
+| Map-typed columns (for example a whole source family selected as `cf1 AS cf1`) | Their own column family named by the alias; one cell per map key |
+| Cell timestamp | 0 (1970-01-01T00:00:00Z) unless the query outputs `_timestamp`; `_timestamp` is truncated to milliseconds |
+| NULL values | Value columns with NULL produce no cell |
 
-Since the CMV shadow table is a regular table, reads use the standard approach:
+## Reading a view
+
+Views are read-only. Use any of:
 
 ```go
-table := client.Open("events_by_account")
-row, err := table.ReadRow(ctx, "region-a#account-42#...")
+// Data API with materialized_view_name (ReadRows, SampleRowKeys).
+mv := client.OpenMaterializedView("clicks_by_account")
+row, err := mv.ReadRow(ctx, rowKey)
+
+// GoogleSQL (PrepareQuery / ExecuteQuery).
+ps, err := client.PrepareStatement(ctx, "SELECT * FROM `clicks_by_account`", nil)
 ```
 
-## What's Changed
+- `ReadRows` and `SampleRowKeys` with `materialized_view_name`.
+- Session protocol: `OpenMaterializedView` (virtual ReadRow; writes rejected).
+- SQL: `ExecuteQuery` over the view.
+- There is no write path: the Data API mutation RPCs cannot name a
+  materialized view, and session writes to a view are rejected.
 
-### New Files
-- `bttest/cmv.go` — CMV config types, registry, key transformation logic
-- `bttest/sql_parse.go` — SQL parser for extracting CMV config from a `CreateMaterializedView` query
-- `bttest/cmv_test.go` — Tests for key transformation, write sync, delete propagation
-- `bttest/sql_parse_test.go` — Tests for the SQL parser
+The view is marked stale by each committed source write and recomputed from
+the source table before the next read (`readable`, `recompute`). Reads
+therefore observe every committed source write. Production CMVs are eventually
+consistent; the emulator does not reproduce that lag.
 
-### Modified Files
-- `little_bigtable.go` — Version bump to 0.2.0
-- `bttest/inmem.go` — Added `cmvs` field to server struct, CMV registration,
-  shadow table creation, write-time sync hooks in MutateRow/MutateRows/
-  CheckAndMutateRow/ReadModifyWriteRow/DropRowRange
-- `bttest/instance_server.go` — Implemented CreateMaterializedView, GetMaterializedView,
-  ListMaterializedViews, UpdateMaterializedView (DeletionProtection only), DeleteMaterializedView
+## Administration
 
-### Recent Additions (2026-06)
-- `bttest/sql_instances.go` — Persistent instance metadata backend (SQLite-backed)
-- `bttest/sql_schema.go` — Added `instances_t` table schema
-- `bttest/inmem.go` — Switched to `UnimplementedXxxServer` embedding for forward-compatible safety;
-  added `instanceBackend` and `LoadInstances`; added Sink filter support
-- `bttest/instance_server.go` — Implemented CreateInstance, GetInstance, ListInstances, UpdateInstance;
-  updated DeleteInstance to cascade-delete tables and persist to SQLite
-- `bttest/inmem_test.go` — Added `TestInstancePersistence` integration test
-- `bttest/instance_server_test.go` — Updated to use SQLite-backed test server
+| Operation | Behavior |
+| --- | --- |
+| `CreateMaterializedView` | Validates the query; at most 50 views per instance and 5 per table (`ResourceExhausted`) |
+| `GetMaterializedView`, `ListMaterializedViews` | Return the stored definition with an etag |
+| `UpdateMaterializedView` | Only `deletion_protection`; the query is immutable |
+| `DeleteMaterializedView` | `FailedPrecondition` while deletion protection is enabled; otherwise removes definition and storage |
+| `DeleteTable` on a source table | `FailedPrecondition` while a CMV reads the table |
+| `DeleteInstance` | Blocked by protected views; otherwise cascades |
 
-## Known Limitations
+## Migration from the shadow-table implementation (v0.4.x and earlier)
 
-- **SQL parser**: CMV SQL is parsed with regex scoped to the standard Bigtable CMV format.
-  Unusual SQL formatting may fail to parse.
-- **GC policy propagation**: The CMV shadow table copies column families from the source
-  at creation time. If the source table's GC policies change later, the CMV won't update.
-- **ModifyColumnFamilies sync**: Column family changes on the source table after CMV
-  creation are not reflected in the CMV table.
-- **Backfill**: Data written to the source table before the CMV is registered is not
-  retroactively copied.
-- **Persistence**: CMV registrations are persisted to SQLite alongside table data and are
-  automatically restored on startup. Shadow table row data is also persistent (it is stored
-  as a regular table in `tables_t`).
+The previous implementation (`bttest/cmv.go`, `bttest/sql_parse.go`, removed)
+kept a regular table named after the view, maintained by a regex parser for a
+narrow `SPLIT(_key)…ORDER BY` subset. On startup, `LoadMaterializedViews`
+re-creates each stored view on the GoogleSQL engine and **removes the legacy
+shadow table** named after the view.
 
-## Example: Key Transformation
+- Code that read the view with `client.Open("<view id>")` must switch to
+  `client.OpenMaterializedView("<view id>")`, `materialized_view_name`, or SQL.
+- Shadow-table rows are not migrated; the view is recomputed from its source.
+- Re-keying behavior differs: multi-column keys use the struct encoding above
+  instead of `#`-joined strings. Define `_key` explicitly if an application
+  needs a specific byte layout.
 
-Source row key format (5 components):
-```
-item_id#timestamp#type#region#account_id
-```
+## Known limitations
 
-With `ORDER BY region, account_id, timestamp, type, item_id, src_key`, a source key:
-```
-item-abc#9999999#type-x#region-a#account-42
-```
-Becomes CMV key:
-```
-region-a#account-42#9999999#type-x#item-abc#item-abc#9999999#type-x#region-a#account-42
-```
-
-The first 5 components are the re-ordered key; the remainder is the full original source
-key appended because `_key AS src_key` appears in the `ORDER BY`.
+- Build-gated (F-1).
+- Multi-column key encoding is emulator-specific.
+- `_timestamp` is truncated to milliseconds; production treats non-multiples of
+  1,000 as invalid rows (counted in `materialized_view/user_errors`).
+- Each recomputation rebuilds the whole view from the source table; cost grows
+  with source size.
+- No CMV metrics (`user_errors`, lag) are emulated.
